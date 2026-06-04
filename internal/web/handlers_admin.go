@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -165,6 +166,27 @@ func (s *Server) handleAdminSiteTogglePause(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	s.respondSiteCard(w, r, site, "")
+}
+
+func (s *Server) handleAdminSiteReprocess(w http.ResponseWriter, r *http.Request) {
+	site := s.lookupSite(w, r)
+	if site == nil {
+		return
+	}
+	flash := "Reprocess queued for " + site.Name
+	if s.scheduler != nil {
+		stats, accepted, err := s.scheduler.Reprocess(r.Context(), site.ID)
+		switch {
+		case err != nil:
+			flash = "Reprocess failed: " + err.Error()
+		case !accepted:
+			flash = "Reprocess skipped — a crawl is already running"
+		default:
+			flash = fmt.Sprintf("Reprocessed %d HTML file(s) (changed %d of %d scanned)",
+				stats.HTML, stats.Changed, stats.Scanned)
+		}
+	}
+	s.respondSiteCard(w, r, site, flash)
 }
 
 func (s *Server) handleAdminSiteCancel(w http.ResponseWriter, r *http.Request) {

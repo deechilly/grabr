@@ -123,6 +123,45 @@ func (s *Scheduler) IsRunning(siteID int64) bool {
 	return r.busy
 }
 
+// Reprocess re-runs the HTML rewriter (link rewriting + analytics stripping)
+// against the existing on-disk mirror for siteID. Goes through the same per-
+// site busy lock as a crawl, so it can't run concurrently with one. Returns
+// true if accepted (the reprocess ran), false if a crawl was already in
+// flight or the site has no runner yet.
+func (s *Scheduler) Reprocess(ctx context.Context, siteID int64) (crawler.ReprocessStats, bool, error) {
+	// If there's an active runner, acquire its busy lock so we can't race a
+	// crawl that's also writing to the mirror dir. If there isn't one (paused
+	// site, etc.), no crawl can be running — proceed without a lock.
+	s.mu.Lock()
+	r, hasRunner := s.runners[siteID]
+	s.mu.Unlock()
+	if hasRunner {
+		r.busyMu.Lock()
+		if r.busy {
+			r.busyMu.Unlock()
+			log.Printf("scheduler: site %d reprocess skipped (crawl in flight)", siteID)
+			return crawler.ReprocessStats{}, false, nil
+		}
+		r.busy = true
+		r.busyMu.Unlock()
+		defer func() {
+			r.busyMu.Lock()
+			r.busy = false
+			r.busyMu.Unlock()
+		}()
+	}
+
+	site, err := s.Store.GetSite(ctx, siteID)
+	if err != nil || site == nil {
+		return crawler.ReprocessStats{}, true, err
+	}
+	mirrorRoot := s.Crawler.MirrorsDir + "/" + site.Slug
+	stats, err := crawler.ReprocessMirror(ctx, mirrorRoot, site.Host)
+	log.Printf("scheduler: site %d (%s) reprocess scanned=%d html=%d changed=%d err=%v",
+		site.ID, site.Slug, stats.Scanned, stats.HTML, stats.Changed, err)
+	return stats, true, err
+}
+
 // Cancel interrupts the in-flight crawl for siteID. Returns true if a crawl
 // was actually cancelled. Safe to call when no crawl is running.
 func (s *Scheduler) Cancel(siteID int64) bool {

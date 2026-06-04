@@ -78,6 +78,7 @@ func (s *Server) Router() http.Handler {
 			r.Post("/sites/{id}/crawl-now", s.handleAdminSiteCrawlNow)
 			r.Post("/sites/{id}/toggle-pause", s.handleAdminSiteTogglePause)
 			r.Post("/sites/{id}/cancel", s.handleAdminSiteCancel)
+			r.Post("/sites/{id}/reprocess", s.handleAdminSiteReprocess)
 			r.Get("/settings", s.handleAdminSettings)
 			r.Post("/settings", s.handleAdminSettingsSave)
 		})

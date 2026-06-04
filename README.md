@@ -30,6 +30,8 @@ one SQLite file, one data directory, one container.
   - [Adaptive rate limiting](#adaptive-rate-limiting)
   - [robots.txt](#robotstxt)
   - [Link rewriting](#link-rewriting)
+  - [Analytics stripping](#analytics-stripping)
+  - [Reprocessing an existing mirror](#reprocessing-an-existing-mirror)
   - [Backups + retention](#backups--retention)
   - [Mirror serving](#mirror-serving)
 - [Data model](#data-model)
@@ -237,6 +239,7 @@ Per-site card buttons:
 | **Pause** | Site is enabled | Disables the schedule and cancels any in-flight crawl. |
 | **Resume** | Site is paused | Re-enables the schedule. |
 | **Cancel** | A crawl is in flight | Interrupts the running crawl; the crawl row is finalized with `status=cancelled`. |
+| **Reprocess** | Crawl is not in flight | Re-runs the HTML rewriter (link rewriting + analytics stripping) on the existing mirror with no re-download. See [Reprocessing](#reprocessing-an-existing-mirror). |
 | **Edit** | always | Goes to the site form. |
 
 ---
@@ -301,6 +304,48 @@ paths before writing the file. The rewriter:
 
 This means a downloaded `tar.gz` snapshot can be extracted anywhere and opened
 directly (`file://...`) without grabr being involved.
+
+### Analytics stripping
+
+After URL rewriting, every mirrored HTML document is run through an analytics
+pass that removes tracker, ad, and session-replay code so the served mirror
+(and the offline `tar.gz`) doesn't phone home. Specifically removed:
+
+- `<script src>`, `<iframe src>`, `<img src>` pointing at known analytics or
+  ad hosts (suffix match against the embedded list — Google Analytics, GTM,
+  DoubleClick, Facebook Pixel, Segment, Mixpanel, Heap, Amplitude, Hotjar,
+  FullStory, Microsoft Clarity, Sentry/Bugsnag/NewRelic browser SDKs,
+  Yandex Metrica, Intercom, Optimizely, etc.).
+- `<link rel="preconnect|dns-prefetch|preload|prefetch">` to those same hosts.
+- Inline `<script>` blocks whose body matches well-known tracker initializers
+  (`gtag(`, `ga('create')`, `_gaq.push`, `fbq(`, `mixpanel.init`,
+  `heap.load`, `amplitude.getInstance`, `hj(`, `clarity(`, `FS.identify`,
+  `_hsq.push`, etc.).
+- `<noscript>` blocks whose raw text references any of the analytics hosts
+  above (catches GA fallback pixels that survive script removal).
+
+Cross-host *non-analytics* resources (fonts, CDN JS/CSS, embedded YouTube
+players, recaptcha widgets) are left untouched. The blocklist is conservative:
+only obvious trackers, not "could be" hosts. See `internal/crawler/analytics.go`
+if you want to extend it.
+
+### Reprocessing an existing mirror
+
+If you've already crawled a site and a rewriter improvement lands (new
+analytics host, better link rewriting), you don't need to re-download. Click
+**Reprocess** on the site card (works whether the site is enabled or paused,
+as long as a crawl isn't already in flight). The job:
+
+1. Walks `<mirrors_dir>/<slug>/` recursively.
+2. For each `.html` / `.htm` file, runs `RewriteHTML` against the stored body.
+3. Writes the result back atomically only when it actually changed (so file
+   mtimes don't churn on idempotent passes).
+
+There's no network access and no entry in the `crawls` table — the result is
+returned inline as a flash message ("Reprocessed N HTML file(s) (changed M of
+S scanned)"). The reprocess goes through the same per-site busy lock as a
+crawl, so kicking a crawl while a reprocess is running (or vice versa) is
+dropped with a warning.
 
 ### Backups + retention
 
@@ -367,6 +412,8 @@ internal/crawler/
     fetcher.go                 # adaptive rate-limited HTTP client
     parser.go                  # HTML link/asset extractor
     rewriter.go                # same-host URL rewriting
+    analytics.go               # analytics/tracker stripping
+    reprocess.go               # offline re-run of the rewriter on an existing mirror
     robots.go                  # robots.txt fetch + parse + Allowed/CrawlDelay
     writer.go                  # URL -> on-disk path mapper + atomic writer
 internal/backup/               # tar.gz pre-crawl snapshots + retention prune
@@ -439,6 +486,8 @@ Implemented:
 - Adaptive rate limiting with `Retry-After`
 - robots.txt fetch, log, and enforce (per-site override)
 - Same-host link/asset rewriting in HTML
+- Analytics/tracker stripping (GA, GTM, FB Pixel, Hotjar, FullStory, etc.)
+- Reprocess action to re-run the rewriter on an existing mirror without re-downloading
 - Mirror serving at `/sites/{slug}/...`
 - Pause/Resume schedule + Cancel in-flight
 - Kick-on-create and manual "Crawl now"

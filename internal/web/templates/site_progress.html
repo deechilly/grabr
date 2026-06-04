@@ -29,10 +29,18 @@
     <button class="secondary" style="font-size:12px; padding:4px 10px"
             hx-post="/admin/sites/{{.Site.ID}}/toggle-pause"
             hx-target="closest .card" hx-swap="innerHTML">Pause</button>
+    <button class="secondary" style="font-size:12px; padding:4px 10px"
+            hx-post="/admin/sites/{{.Site.ID}}/reprocess"
+            hx-target="closest .card" hx-swap="innerHTML"
+            title="Re-run the HTML rewriter on the existing mirror (no re-download)">Reprocess</button>
     <button style="font-size:12px; padding:4px 10px"
             hx-post="/admin/sites/{{.Site.ID}}/crawl-now"
             hx-target="closest .card" hx-swap="innerHTML">Crawl now</button>
   {{else}}
+    <button class="secondary" style="font-size:12px; padding:4px 10px"
+            hx-post="/admin/sites/{{.Site.ID}}/reprocess"
+            hx-target="closest .card" hx-swap="innerHTML"
+            title="Re-run the HTML rewriter on the existing mirror (no re-download)">Reprocess</button>
     <button style="font-size:12px; padding:4px 10px"
             hx-post="/admin/sites/{{.Site.ID}}/toggle-pause"
             hx-target="closest .card" hx-swap="innerHTML">Resume</button>

@@ -40,6 +40,11 @@ func RewriteHTML(base *url.URL, body []byte, currentRelPath, host string) []byte
 	if err != nil {
 		return body
 	}
+	// Strip analytics and tracking elements before rewriting URLs. They're
+	// cross-host so URL rewriting wouldn't touch them anyway, but removing
+	// them prevents the served mirror (and the offline tar.gz) from phoning
+	// home to GA, GTM, Hotjar, Sentry, and friends.
+	stripAnalytics(doc, base)
 	host = strings.ToLower(host)
 	currentDir := filepath.ToSlash(filepath.Dir(currentRelPath))
 	if currentDir == "." {
