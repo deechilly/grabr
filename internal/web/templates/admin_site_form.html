@@ -1,0 +1,46 @@
+{{define "content"}}
+<h1>{{if .Site.ID}}Edit site{{else}}Add site{{end}}</h1>
+
+<form class="stack" method="post" action="{{.FormAction}}">
+  <label>
+    Display name
+    <input type="text" name="name" value="{{.Site.Name}}" required>
+  </label>
+  <label>
+    Slug <span class="muted" style="font-weight:normal">(used in URLs and on disk; lowercase letters, digits, dashes)</span>
+    <input type="text" name="slug" value="{{.Site.Slug}}" pattern="[a-z0-9][a-z0-9\-]*" required>
+  </label>
+  <label>
+    Seed URL
+    <input type="url" name="seed_url" value="{{.Site.SeedURL}}" placeholder="https://example.com/" required>
+  </label>
+  <label>
+    Crawl interval (seconds)
+    <input type="number" name="interval_seconds" value="{{if .Site.IntervalSeconds}}{{.Site.IntervalSeconds}}{{else}}86400{{end}}" min="60" required>
+  </label>
+  <label>
+    Backups to keep
+    <input type="number" name="backup_keep_n" value="{{if .Site.BackupKeepN}}{{.Site.BackupKeepN}}{{else}}5{{end}}" min="1" required>
+  </label>
+  <label>
+    Initial rate limit (requests/sec) <span class="muted" style="font-weight:normal">— adaptive controller may adjust at runtime</span>
+    <input type="text" name="rate_limit_rps" value="{{if .Site.RateLimitRPS}}{{.Site.RateLimitRPS}}{{else}}1.0{{end}}" required>
+  </label>
+  <label>
+    Max concurrent fetches (ceiling for adaptive controller)
+    <input type="number" name="max_concurrent" value="{{if .Site.MaxConcurrent}}{{.Site.MaxConcurrent}}{{else}}4{{end}}" min="1" max="32" required>
+  </label>
+  <label class="row">
+    <input type="checkbox" name="respect_robots" value="1" {{if .RespectRobotsChecked}}checked{{end}}>
+    <span>Respect robots.txt</span>
+  </label>
+  <label class="row">
+    <input type="checkbox" name="enabled" value="1" {{if .EnabledChecked}}checked{{end}}>
+    <span>Enabled (scheduled crawls run)</span>
+  </label>
+  <div class="actions">
+    <button type="submit">{{if .Site.ID}}Save{{else}}Create site{{end}}</button>
+    <a href="/admin/sites" class="muted">Cancel</a>
+  </div>
+</form>
+{{end}}

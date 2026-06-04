@@ -1,0 +1,25 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}} · grabr</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><a href="/">grabr</a></div>
+    <nav>
+      <a href="/" class="{{if eq .Nav "index"}}active{{end}}">Sites</a>
+      <a href="/admin/sites" class="{{if eq .Nav "admin"}}active{{end}}">Admin</a>
+      <a href="/admin/settings" class="{{if eq .Nav "settings"}}active{{end}}">Settings</a>
+    </nav>
+  </header>
+  <main>
+    {{if .Flash}}<div class="flash {{.FlashKind}}">{{.Flash}}</div>{{end}}
+    {{template "content" .}}
+  </main>
+</body>
+</html>
+{{end}}

@@ -1,0 +1,19 @@
+{{define "content"}}
+<div class="row" style="margin-bottom:16px">
+  <h1 class="grow">Indexed sites</h1>
+  <a class="btn" href="/admin/sites/new">Add site</a>
+</div>
+
+{{if not .Sites}}
+  <p class="muted">No sites configured yet. <a href="/admin/sites/new">Add one</a> to get started.</p>
+{{else}}
+  <div class="cards">
+    {{range .Sites}}
+      <div class="card" id="site-{{.Site.ID}}"
+           hx-get="/fragments/site/{{.Site.ID}}/progress" hx-trigger="every 3s" hx-swap="innerHTML">
+        {{template "site_progress" .}}
+      </div>
+    {{end}}
+  </div>
+{{end}}
+{{end}}

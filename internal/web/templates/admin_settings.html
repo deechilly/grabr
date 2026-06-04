@@ -1,0 +1,29 @@
+{{define "content"}}
+<h1>Settings</h1>
+
+<form class="stack" method="post" action="/admin/settings">
+  <label>
+    Mirrors directory <span class="muted" style="font-weight:normal">(where indexed site content is stored)</span>
+    <input type="text" name="mirrors_dir" value="{{.MirrorsDir}}" required>
+  </label>
+  <label>
+    Backups directory <span class="muted" style="font-weight:normal">(tar.gz snapshots written before each crawl)</span>
+    <input type="text" name="backups_dir" value="{{.BackupsDir}}" required>
+  </label>
+  <label>
+    Default crawl interval (seconds) — applied to new sites
+    <input type="number" name="default_interval_seconds" value="{{.DefaultIntervalSeconds}}" min="60" required>
+  </label>
+  <label>
+    Default backups to keep — applied to new sites
+    <input type="number" name="default_backup_keep_n" value="{{.DefaultBackupKeepN}}" min="1" required>
+  </label>
+  <div class="actions">
+    <button type="submit">Save</button>
+  </div>
+</form>
+
+<p class="muted" style="margin-top:24px; font-size:12px">
+  Changing the mirrors or backups directory does not move existing content. Move the files yourself if needed; future crawls will write to the new locations.
+</p>
+{{end}}

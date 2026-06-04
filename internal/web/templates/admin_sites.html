@@ -1,0 +1,39 @@
+{{define "content"}}
+<div class="row" style="margin-bottom:16px">
+  <h1 class="grow">Sites</h1>
+  <a class="btn" href="/admin/sites/new">Add site</a>
+</div>
+
+{{if not .Sites}}
+  <p class="muted">No sites configured yet.</p>
+{{else}}
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Seed URL</th>
+        <th>Interval</th>
+        <th>Enabled</th>
+        <th>Robots</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Sites}}
+      <tr>
+        <td><a href="/admin/sites/{{.ID}}/edit">{{.Name}}</a> <span class="muted">/{{.Slug}}</span></td>
+        <td><code>{{.SeedURL}}</code></td>
+        <td>{{.IntervalSeconds}}s</td>
+        <td>{{if .Enabled}}yes{{else}}<span class="muted">no</span>{{end}}</td>
+        <td>{{if .RespectRobots}}respect{{else}}<span class="muted">ignore</span>{{end}}</td>
+        <td style="text-align:right">
+          <form method="post" action="/admin/sites/{{.ID}}/delete" style="display:inline" onsubmit="return confirm('Delete {{.Name}}?')">
+            <button class="danger" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+{{end}}
+{{end}}

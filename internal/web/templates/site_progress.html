@@ -1,0 +1,25 @@
+{{define "site_progress"}}
+<h3>
+  <span><a href="/sites/{{.Site.Slug}}/">{{.Site.Name}}</a></span>
+  <span class="badge {{.StatusClass}}">{{.StatusLabel}}</span>
+</h3>
+<div class="muted" style="font-size:12px; margin-bottom:6px">{{.Site.SeedURL}}</div>
+
+{{if .Latest}}
+  <div class="row" style="font-size:12px; color:var(--muted)">
+    <span>{{.Latest.PagesVisited}} / {{.Latest.PagesDiscovered}} pages</span>
+    <span class="grow"></span>
+    <span>{{.LatestWhen}}</span>
+  </div>
+  <div class="progress"><div style="width: {{.PercentStr}}%"></div></div>
+{{else}}
+  <div class="muted" style="font-size:12px">No crawl yet. Next run: {{.NextRun}}</div>
+  <div class="progress"><div style="width: 0%"></div></div>
+{{end}}
+
+<div class="row" style="margin-top:8px">
+  <span class="muted" style="font-size:12px">Every {{.IntervalLabel}}</span>
+  <span class="grow"></span>
+  <a href="/admin/sites/{{.Site.ID}}/edit" class="muted" style="font-size:12px">Edit</a>
+</div>
+{{end}}
