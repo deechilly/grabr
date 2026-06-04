@@ -34,6 +34,8 @@ h1, h2, h3 { margin: 0 0 12px; }
 .badge.running { color: var(--accent); }
 .badge.failed { color: var(--err); }
 .badge.skipped { color: var(--warn); }
+.badge.cancelled { color: var(--warn); }
+.badge.paused { color: var(--muted); }
 .progress { background: var(--panel-2); border-radius: 6px; height: 8px; overflow: hidden; margin: 8px 0; }
 .progress > div { background: var(--accent); height: 100%; width: 0%; transition: width 0.4s ease; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

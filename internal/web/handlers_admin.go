@@ -89,6 +89,12 @@ func (s *Server) handleAdminSiteCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	if s.scheduler != nil {
+		s.scheduler.Add(site)
+		if site.Enabled {
+			s.scheduler.Kick(site.ID)
+		}
+	}
 	redirect(w, r, "/admin/sites", "Site "+site.Name+" created", "")
 }
 
@@ -119,6 +125,9 @@ func (s *Server) handleAdminSiteUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	if s.scheduler != nil {
+		s.scheduler.Update(updated)
+	}
 	redirect(w, r, "/admin/sites", "Site "+updated.Name+" updated", "")
 }
 
@@ -132,7 +141,97 @@ func (s *Server) handleAdminSiteDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
+	if s.scheduler != nil {
+		s.scheduler.Remove(id)
+	}
 	redirect(w, r, "/admin/sites", "Site deleted", "")
+}
+
+func (s *Server) handleAdminSiteTogglePause(w http.ResponseWriter, r *http.Request) {
+	site := s.lookupSite(w, r)
+	if site == nil {
+		return
+	}
+	site.Enabled = !site.Enabled
+	if err := s.store.UpdateSite(r.Context(), site); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if s.scheduler != nil {
+		s.scheduler.Update(site)
+		if !site.Enabled {
+			// Pausing also cancels any in-flight crawl.
+			s.scheduler.Cancel(site.ID)
+		}
+	}
+	s.respondSiteCard(w, r, site, "")
+}
+
+func (s *Server) handleAdminSiteCancel(w http.ResponseWriter, r *http.Request) {
+	site := s.lookupSite(w, r)
+	if site == nil {
+		return
+	}
+	if s.scheduler != nil {
+		s.scheduler.Cancel(site.ID)
+	}
+	s.respondSiteCard(w, r, site, "Crawl cancelled for "+site.Name)
+}
+
+func (s *Server) lookupSite(w http.ResponseWriter, r *http.Request) *store.Site {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", 400)
+		return nil
+	}
+	site, err := s.store.GetSite(r.Context(), id)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return nil
+	}
+	if site == nil {
+		http.NotFound(w, r)
+		return nil
+	}
+	return site
+}
+
+// respondSiteCard returns either the refreshed HTMX card fragment or a redirect
+// back to the index with an optional flash, depending on the request type.
+func (s *Server) respondSiteCard(w http.ResponseWriter, r *http.Request, site *store.Site, flash string) {
+	if r.Header.Get("HX-Request") == "true" {
+		latest, _ := s.store.LatestCrawlForSite(r.Context(), site.ID)
+		s.renderFragment(w, "site_progress", buildSiteCardVM(site, latest))
+		return
+	}
+	if flash == "" {
+		flash = "Updated"
+	}
+	redirect(w, r, "/", flash, "")
+}
+
+func (s *Server) handleAdminSiteCrawlNow(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", 400)
+		return
+	}
+	site, err := s.store.GetSite(r.Context(), id)
+	if err != nil || site == nil {
+		http.NotFound(w, r)
+		return
+	}
+	if s.scheduler != nil {
+		s.scheduler.Kick(site.ID)
+	}
+	// If invoked from HTMX, return the refreshed card fragment so the badge
+	// flips to "running" immediately. Otherwise redirect back.
+	if r.Header.Get("HX-Request") == "true" {
+		latest, _ := s.store.LatestCrawlForSite(r.Context(), site.ID)
+		s.renderFragment(w, "site_progress", buildSiteCardVM(site, latest))
+		return
+	}
+	redirect(w, r, "/", "Crawl queued for "+site.Name, "")
 }
 
 func (s *Server) parseSiteForm(r *http.Request, into *store.Site) (*store.Site, error) {

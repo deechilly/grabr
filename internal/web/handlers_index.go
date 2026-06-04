@@ -3,7 +3,9 @@ package web
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -20,6 +22,24 @@ type siteCardVM struct {
 	LatestWhen    string
 	NextRun       string
 	IntervalLabel string
+	LocalHomeURL  string // path to the mirrored copy of the seed URL
+}
+
+// localHomeFor returns the local URL that should be used as the "default
+// page" link for a site. We derive it from the seed URL's path, so a seed of
+// https://example.com/docs/ produces /sites/example/docs/ — matching what the
+// crawler wrote to disk and what the mirror handler resolves to index.html.
+func localHomeFor(site *store.Site) string {
+	base := "/sites/" + site.Slug
+	u, err := url.Parse(site.SeedURL)
+	if err != nil || u.Path == "" || u.Path == "/" {
+		return base + "/"
+	}
+	path := u.Path
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
 }
 
 func buildSiteCardVM(site *store.Site, latest *store.CrawlSummary) siteCardVM {
@@ -31,9 +51,7 @@ func buildSiteCardVM(site *store.Site, latest *store.CrawlSummary) siteCardVM {
 		StatusClass:   "",
 		PercentStr:    "0",
 		NextRun:       "—",
-	}
-	if !site.Enabled {
-		vm.StatusLabel = "disabled"
+		LocalHomeURL:  localHomeFor(site),
 	}
 	if latest != nil {
 		vm.StatusLabel = latest.Status
@@ -46,6 +64,8 @@ func buildSiteCardVM(site *store.Site, latest *store.CrawlSummary) siteCardVM {
 			vm.StatusClass = "failed"
 		case "skipped":
 			vm.StatusClass = "skipped"
+		case "cancelled":
+			vm.StatusClass = "cancelled"
 		}
 		if latest.PagesDiscovered > 0 {
 			pct := (float64(latest.PagesVisited) / float64(latest.PagesDiscovered)) * 100
@@ -60,8 +80,13 @@ func buildSiteCardVM(site *store.Site, latest *store.CrawlSummary) siteCardVM {
 			vm.LatestWhen = "since " + humanSince(latest.StartedAt) + " ago"
 		}
 	}
+	// Paused overrides any non-running latest status — but a running crawl
+	// stays visible so the cancel button has somewhere to land.
+	if !site.Enabled && vm.StatusClass != "running" {
+		vm.StatusLabel = "paused"
+		vm.StatusClass = "paused"
+	}
 	if site.Enabled {
-		// Best-effort next-run estimate from latest start time.
 		if latest != nil {
 			next := latest.StartedAt.Add(time.Duration(site.IntervalSeconds) * time.Second)
 			if d := time.Until(next); d > 0 {
@@ -72,6 +97,8 @@ func buildSiteCardVM(site *store.Site, latest *store.CrawlSummary) siteCardVM {
 		} else {
 			vm.NextRun = "on next tick"
 		}
+	} else {
+		vm.NextRun = "paused"
 	}
 	return vm
 }

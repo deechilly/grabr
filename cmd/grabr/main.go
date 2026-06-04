@@ -10,7 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/deechilly/grabr/internal/backup"
 	"github.com/deechilly/grabr/internal/config"
+	"github.com/deechilly/grabr/internal/crawler"
+	"github.com/deechilly/grabr/internal/scheduler"
 	"github.com/deechilly/grabr/internal/store"
 	"github.com/deechilly/grabr/internal/web"
 )
@@ -34,7 +37,30 @@ func run() error {
 	}
 	defer st.Close()
 
-	srv, err := web.New(cfg, st)
+	// Effective dirs: settings table overrides env defaults at boot.
+	// Changes via the admin UI require a restart to take effect; the UI says so.
+	mirrorsDir, backupsDir := resolveDirs(st, cfg)
+	log.Printf("dirs | mirrors=%s backups=%s", mirrorsDir, backupsDir)
+
+	backuper := backup.New(mirrorsDir, backupsDir, func(slug string) int {
+		site, err := st.GetSiteBySlug(context.Background(), slug)
+		if err != nil || site == nil {
+			return cfg.DefaultBackupKeepN
+		}
+		return site.BackupKeepN
+	})
+
+	cr := &crawler.Crawler{Store: st, MirrorsDir: mirrorsDir, Backuper: backuper}
+	sched := scheduler.New(st, cr)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := sched.Start(ctx); err != nil {
+		return err
+	}
+
+	srv, err := web.New(cfg, st, sched, mirrorsDir)
 	if err != nil {
 		return err
 	}
@@ -44,9 +70,6 @@ func run() error {
 		Handler:           srv.Router(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -60,14 +83,29 @@ func run() error {
 	case <-ctx.Done():
 		log.Printf("shutting down")
 	case err := <-errCh:
+		sched.Stop()
 		return err
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-		return err
+		log.Printf("http shutdown: %v", err)
 	}
+	sched.Stop()
 	_ = os.Stdout.Sync()
 	return nil
+}
+
+func resolveDirs(st *store.Store, cfg *config.Config) (string, string) {
+	mirrors, backups := cfg.MirrorsDir, cfg.BackupsDir
+	if v, ok, _ := st.GetSetting(context.Background(), "mirrors_dir"); ok && v != "" {
+		mirrors = v
+	}
+	if v, ok, _ := st.GetSetting(context.Background(), "backups_dir"); ok && v != "" {
+		backups = v
+	}
+	_ = os.MkdirAll(mirrors, 0o755)
+	_ = os.MkdirAll(backups, 0o755)
+	return mirrors, backups
 }

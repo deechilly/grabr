@@ -273,6 +273,85 @@ func (s *Store) LatestCrawlForSite(ctx context.Context, siteID int64) (*CrawlSum
 	return &c, nil
 }
 
+// --- Crawl lifecycle ---
+
+func (s *Store) StartCrawl(ctx context.Context, siteID int64) (int64, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO crawls (site_id, started_at, status, pages_visited, pages_discovered, bytes_downloaded)
+		VALUES (?, ?, 'running', 0, 0, 0)`, siteID, now)
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return id, nil
+}
+
+func (s *Store) BumpCrawlProgress(ctx context.Context, crawlID int64, deltaVisited, deltaDiscovered int, deltaBytes int64) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE crawls
+		SET pages_visited = pages_visited + ?,
+		    pages_discovered = pages_discovered + ?,
+		    bytes_downloaded = bytes_downloaded + ?
+		WHERE id=?`, deltaVisited, deltaDiscovered, deltaBytes, crawlID)
+	return err
+}
+
+func (s *Store) FinishCrawl(ctx context.Context, crawlID int64, status, errMsg string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE crawls SET finished_at=?, status=?, error_message=? WHERE id=?`,
+		now, status, errMsg, crawlID)
+	return err
+}
+
+func (s *Store) MarkRunningCrawlsAsFailed(ctx context.Context, reason string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE crawls SET finished_at=?, status='failed', error_message=?
+		WHERE status='running'`, now, reason)
+	return err
+}
+
+func (s *Store) AddRobotsLog(ctx context.Context, siteID int64, statusCode int, content, errMsg string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	var statusVal, contentVal, errVal any
+	if statusCode > 0 {
+		statusVal = statusCode
+	}
+	if content != "" {
+		contentVal = content
+	}
+	if errMsg != "" {
+		errVal = errMsg
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO robots_logs (site_id, fetched_at, status_code, content, error)
+		VALUES (?, ?, ?, ?, ?)`, siteID, now, statusVal, contentVal, errVal)
+	return err
+}
+
+func (s *Store) AddVisitedURL(ctx context.Context, crawlID int64, urlStr string, status int, contentType string, bytes int64, errMsg string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	var statusVal, bytesVal, ctVal, errVal any
+	if status > 0 {
+		statusVal = status
+	}
+	if bytes > 0 {
+		bytesVal = bytes
+	}
+	if contentType != "" {
+		ctVal = contentType
+	}
+	if errMsg != "" {
+		errVal = errMsg
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO visited_urls (crawl_id, url, status_code, content_type, bytes, fetched_at, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, crawlID, urlStr, statusVal, ctVal, bytesVal, now, errVal)
+	return err
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

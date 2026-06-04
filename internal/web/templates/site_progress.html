@@ -1,6 +1,6 @@
 {{define "site_progress"}}
 <h3>
-  <span><a href="/sites/{{.Site.Slug}}/">{{.Site.Name}}</a></span>
+  <span><a href="{{.LocalHomeURL}}">{{.Site.Name}}</a></span>
   <span class="badge {{.StatusClass}}">{{.StatusLabel}}</span>
 </h3>
 <div class="muted" style="font-size:12px; margin-bottom:6px">{{.Site.SeedURL}}</div>
@@ -18,8 +18,26 @@
 {{end}}
 
 <div class="row" style="margin-top:8px">
-  <span class="muted" style="font-size:12px">Every {{.IntervalLabel}}</span>
+  <span class="muted" style="font-size:12px">Every {{.IntervalLabel}}{{if not .Site.Enabled}} · paused{{end}}</span>
   <span class="grow"></span>
+
+  {{if eq .StatusClass "running"}}
+    <button class="danger" style="font-size:12px; padding:4px 10px"
+            hx-post="/admin/sites/{{.Site.ID}}/cancel"
+            hx-target="closest .card" hx-swap="innerHTML">Cancel</button>
+  {{else if .Site.Enabled}}
+    <button class="secondary" style="font-size:12px; padding:4px 10px"
+            hx-post="/admin/sites/{{.Site.ID}}/toggle-pause"
+            hx-target="closest .card" hx-swap="innerHTML">Pause</button>
+    <button style="font-size:12px; padding:4px 10px"
+            hx-post="/admin/sites/{{.Site.ID}}/crawl-now"
+            hx-target="closest .card" hx-swap="innerHTML">Crawl now</button>
+  {{else}}
+    <button style="font-size:12px; padding:4px 10px"
+            hx-post="/admin/sites/{{.Site.ID}}/toggle-pause"
+            hx-target="closest .card" hx-swap="innerHTML">Resume</button>
+  {{end}}
+
   <a href="/admin/sites/{{.Site.ID}}/edit" class="muted" style="font-size:12px">Edit</a>
 </div>
 {{end}}

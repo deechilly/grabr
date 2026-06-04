@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/deechilly/grabr/internal/config"
+	"github.com/deechilly/grabr/internal/scheduler"
 	"github.com/deechilly/grabr/internal/store"
 )
 
@@ -26,13 +28,15 @@ var staticFS embed.FS
 type Server struct {
 	cfg          *config.Config
 	store        *store.Store
+	scheduler    *scheduler.Scheduler
+	mirrorsDir   string
 	fragmentTpls *template.Template
 
 	pageMu  sync.RWMutex
 	pageTpl map[string]*template.Template // pageName -> parsed (layout + page)
 }
 
-func New(cfg *config.Config, st *store.Store) (*Server, error) {
+func New(cfg *config.Config, st *store.Store, sched *scheduler.Scheduler, mirrorsDir string) (*Server, error) {
 	frag, err := template.New("").ParseFS(templatesFS, "templates/site_progress.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse fragment templates: %w", err)
@@ -40,6 +44,8 @@ func New(cfg *config.Config, st *store.Store) (*Server, error) {
 	return &Server{
 		cfg:          cfg,
 		store:        st,
+		scheduler:    sched,
+		mirrorsDir:   mirrorsDir,
 		fragmentTpls: frag,
 		pageTpl:      map[string]*template.Template{},
 	}, nil
@@ -59,6 +65,8 @@ func (s *Server) Router() http.Handler {
 		r.Use(s.basicAuth)
 		r.Get("/", s.handleIndex)
 		r.Get("/fragments/site/{id}/progress", s.handleSiteProgressFragment)
+		r.Get("/sites/{slug}", s.handleMirrorRedirect)
+		r.Get("/sites/{slug}/*", s.handleMirror)
 
 		r.Route("/admin", func(r chi.Router) {
 			r.Get("/sites", s.handleAdminSites)
@@ -67,6 +75,9 @@ func (s *Server) Router() http.Handler {
 			r.Get("/sites/{id}/edit", s.handleAdminSiteEdit)
 			r.Post("/sites/{id}", s.handleAdminSiteUpdate)
 			r.Post("/sites/{id}/delete", s.handleAdminSiteDelete)
+			r.Post("/sites/{id}/crawl-now", s.handleAdminSiteCrawlNow)
+			r.Post("/sites/{id}/toggle-pause", s.handleAdminSiteTogglePause)
+			r.Post("/sites/{id}/cancel", s.handleAdminSiteCancel)
 			r.Get("/settings", s.handleAdminSettings)
 			r.Post("/settings", s.handleAdminSettingsSave)
 		})
@@ -133,6 +144,62 @@ func (s *Server) renderFragment(w http.ResponseWriter, name string, data any) {
 	if err := s.fragmentTpls.ExecuteTemplate(w, name, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (s *Server) handleMirrorRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, r.URL.Path+"/", http.StatusFound)
+}
+
+func (s *Server) handleMirror(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	site, err := s.store.GetSiteBySlug(r.Context(), slug)
+	if err != nil || site == nil {
+		http.NotFound(w, r)
+		return
+	}
+	root := filepath.Join(s.mirrorsDir, slug)
+	prefix := "/sites/" + slug + "/"
+	http.StripPrefix(prefix, serveMirrorFS(root)).ServeHTTP(w, r)
+}
+
+// serveMirrorFS serves files under root, mapping directory paths and
+// extensionless requests to their stored "index.html" representation, which is
+// the layout LocalPathFor produces.
+func serveMirrorFS(root string) http.Handler {
+	fs := http.Dir(root)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		urlPath := strings.TrimPrefix(r.URL.Path, "/")
+		if urlPath == "" || strings.HasSuffix(urlPath, "/") {
+			tryIndex := filepath.Join(urlPath, "index.html")
+			if serveIfExists(w, r, fs, tryIndex) {
+				return
+			}
+		}
+		// Direct file first; fall back to /index.html for extensionless paths.
+		if serveIfExists(w, r, fs, urlPath) {
+			return
+		}
+		if !strings.Contains(filepath.Base(urlPath), ".") {
+			if serveIfExists(w, r, fs, filepath.Join(urlPath, "index.html")) {
+				return
+			}
+		}
+		http.NotFound(w, r)
+	})
+}
+
+func serveIfExists(w http.ResponseWriter, r *http.Request, fs http.FileSystem, name string) bool {
+	f, err := fs.Open("/" + filepath.ToSlash(name))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.IsDir() {
+		return false
+	}
+	http.ServeContent(w, r, name, info.ModTime(), f)
+	return true
 }
 
 func slugify(s string) string {
