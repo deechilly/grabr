@@ -67,6 +67,8 @@ func (s *Server) Router() http.Handler {
 		r.Get("/fragments/site/{id}/progress", s.handleSiteProgressFragment)
 		r.Get("/sites/{slug}", s.handleMirrorRedirect)
 		r.Get("/sites/{slug}/*", s.handleMirror)
+		r.Get("/view/{slug}", s.handleViewerRedirect)
+		r.Get("/view/{slug}/*", s.handleViewer)
 
 		r.Route("/admin", func(r chi.Router) {
 			r.Get("/sites", s.handleAdminSites)
@@ -149,6 +151,62 @@ func (s *Server) renderFragment(w http.ResponseWriter, name string, data any) {
 
 func (s *Server) handleMirrorRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, r.URL.Path+"/", http.StatusFound)
+}
+
+func (s *Server) handleViewerRedirect(w http.ResponseWriter, r *http.Request) {
+	http.Redirect(w, r, r.URL.Path+"/", http.StatusFound)
+}
+
+func (s *Server) handleViewer(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	site, err := s.store.GetSiteBySlug(r.Context(), slug)
+	if err != nil || site == nil {
+		http.NotFound(w, r)
+		return
+	}
+	prefix := "/view/" + slug
+	rest := strings.TrimPrefix(r.URL.Path, prefix)
+	if rest == "" {
+		rest = "/"
+	}
+	iframeSrc := "/sites/" + slug + rest
+	if r.URL.RawQuery != "" {
+		iframeSrc += "?" + r.URL.RawQuery
+	}
+	data := struct {
+		Site        *store.Site
+		Slug        string
+		InitialPath string
+		IframeSrc   string
+	}{
+		Site:        site,
+		Slug:        slug,
+		InitialPath: rest,
+		IframeSrc:   iframeSrc,
+	}
+	s.renderViewer(w, data)
+}
+
+func (s *Server) renderViewer(w http.ResponseWriter, data any) {
+	const name = "viewer.html"
+	s.pageMu.RLock()
+	t := s.pageTpl[name]
+	s.pageMu.RUnlock()
+	if t == nil {
+		parsed, err := template.New("").ParseFS(templatesFS, "templates/"+name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.pageMu.Lock()
+		s.pageTpl[name] = parsed
+		s.pageMu.Unlock()
+		t = parsed
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := t.ExecuteTemplate(w, name, data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func (s *Server) handleMirror(w http.ResponseWriter, r *http.Request) {

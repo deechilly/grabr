@@ -25,12 +25,12 @@ type siteCardVM struct {
 	LocalHomeURL  string // path to the mirrored copy of the seed URL
 }
 
-// localHomeFor returns the local URL that should be used as the "default
-// page" link for a site. We derive it from the seed URL's path, so a seed of
-// https://example.com/docs/ produces /sites/example/docs/ — matching what the
-// crawler wrote to disk and what the mirror handler resolves to index.html.
+// localHomeFor returns the embedded-viewer URL for a site's seed page. The
+// viewer wraps the mirror in an iframe with a "back to grabr" top bar.
+// Derived from the seed URL's path so a seed of https://example.com/docs/
+// produces /view/example/docs/.
 func localHomeFor(site *store.Site) string {
-	base := "/sites/" + site.Slug
+	base := "/view/" + site.Slug
 	u, err := url.Parse(site.SeedURL)
 	if err != nil || u.Path == "" || u.Path == "/" {
 		return base + "/"

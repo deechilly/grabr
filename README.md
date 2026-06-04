@@ -32,6 +32,7 @@ one SQLite file, one data directory, one container.
   - [Link rewriting](#link-rewriting)
   - [Analytics stripping](#analytics-stripping)
   - [Reprocessing an existing mirror](#reprocessing-an-existing-mirror)
+  - [Embedded viewer](#embedded-viewer)
   - [Backups + retention](#backups--retention)
   - [Mirror serving](#mirror-serving)
 - [Data model](#data-model)
@@ -224,9 +225,14 @@ progress updates and inline controls.
   status badge, a progress bar (visited / discovered), the interval, the next
   scheduled run, and per-site controls. Cards poll for fresh state every 3
   seconds via HTMX.
-- `/sites/{slug}/...` — **Mirror browse.** Serves the captured content for that
-  site. The card link points at the seed URL's mirrored path, so a seed of
-  `https://example.com/docs/` opens at `/sites/example/docs/`.
+- `/view/{slug}/...` — **Embedded viewer.** A persistent grabr top bar with a
+  "back to grabr" link, the site name, and a live-updating crumb, plus an
+  iframe filling the rest of the viewport pointing at the corresponding
+  `/sites/{slug}/...` path. Card links on the landing page point here. See
+  [Embedded viewer](#embedded-viewer).
+- `/sites/{slug}/...` — **Raw mirror.** Serves the captured content for that
+  site, no chrome. Useful for direct linking, scripting, or opening in a
+  separate tab.
 - `/admin/sites` — **Site table.** List, link to edit, delete.
 - `/admin/sites/new` and `/admin/sites/{id}/edit` — **Site form.**
 - `/admin/settings` — **Global settings.** Directory paths and new-site defaults.
@@ -346,6 +352,35 @@ returned inline as a flash message ("Reprocessed N HTML file(s) (changed M of
 S scanned)"). The reprocess goes through the same per-site busy lock as a
 crawl, so kicking a crawl while a reprocess is running (or vice versa) is
 dropped with a warning.
+
+### Embedded viewer
+
+Clicking a site on the landing page opens `/view/{slug}/<seed-path>`, which
+renders a thin top bar plus an iframe over the mirrored content:
+
+```
++----------------------------------------------------------+
+| <- grabr   Site Name   /docs/forms/         Open ^       |
++----------------------------------------------------------+
+|                                                          |
+|       (iframe showing /sites/<slug>/docs/forms/)         |
+|                                                          |
++----------------------------------------------------------+
+```
+
+- **← grabr** returns to the index in one click.
+- **Crumb** shows the path you're currently viewing inside the mirror.
+- **Open** opens the current page directly in a new tab (raw `/sites/...`
+  URL, no iframe chrome).
+
+A small same-origin script polls the iframe location every ~750ms and updates
+both the crumb and the browser URL bar (`window.history.replaceState`), so a
+deep URL inside the iframe is shareable just by copying the address bar.
+
+Cross-host links inside the mirror are tagged with `target="_blank"
+rel="noopener noreferrer"` at rewrite time, so clicking e.g. a `github.com`
+link inside the viewer opens a new browser tab rather than breaking out of
+the iframe.
 
 ### Backups + retention
 

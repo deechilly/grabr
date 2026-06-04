@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Site.Name}} · grabr viewer</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    html, body { height: 100%; margin: 0; }
+    .viewer-shell { display: flex; flex-direction: column; height: 100vh; }
+    .viewer-bar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+      font-size: 13px; flex: 0 0 auto;
+    }
+    .viewer-bar .brand { font-weight: 600; }
+    .viewer-bar .crumb { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
+    .viewer-bar a, .viewer-bar button {
+      background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+      padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; text-decoration: none;
+    }
+    .viewer-bar a:hover, .viewer-bar button:hover { background: var(--border); }
+    .viewer-frame { flex: 1 1 auto; border: 0; width: 100%; background: #fff; }
+  </style>
+</head>
+<body>
+  <div class="viewer-shell">
+    <div class="viewer-bar">
+      <a href="/" title="Back to grabr index">&larr; grabr</a>
+      <span class="brand">{{.Site.Name}}</span>
+      <span class="crumb" id="vcrumb">{{.InitialPath}}</span>
+      <a id="vopen" href="{{.IframeSrc}}" target="_blank" rel="noopener" title="Open this page in a new tab">Open &nearr;</a>
+    </div>
+    <iframe id="vframe" class="viewer-frame" src="{{.IframeSrc}}" referrerpolicy="no-referrer"></iframe>
+  </div>
+  <script>
+    (function() {
+      var frame  = document.getElementById('vframe');
+      var crumb  = document.getElementById('vcrumb');
+      var open   = document.getElementById('vopen');
+      var slug   = {{.Slug}};
+      var prefix = '/sites/' + slug;
+      function sync() {
+        try {
+          var loc = frame.contentWindow.location;
+          var path = loc.pathname + (loc.search || '') + (loc.hash || '');
+          // Strip the /sites/<slug> prefix when displaying.
+          var visible = path.indexOf(prefix) === 0 ? path.slice(prefix.length) : path;
+          if (!visible) visible = '/';
+          crumb.textContent = visible;
+          open.href = loc.href;
+          // Keep the browser URL bar in sync so deep-links are shareable.
+          var viewerPath = '/view/' + slug + visible;
+          if (window.location.pathname + window.location.search + window.location.hash !== viewerPath) {
+            window.history.replaceState(null, '', viewerPath);
+          }
+        } catch (e) {
+          // cross-origin (shouldn't happen for same-host mirror, but ignore)
+        }
+      }
+      frame.addEventListener('load', sync);
+      setInterval(sync, 750);
+    })();
+  </script>
+</body>
+</html>

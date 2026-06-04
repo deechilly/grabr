@@ -82,6 +82,33 @@ func RewriteHTML(base *url.URL, body []byte, currentRelPath, host string) []byte
 		return rel
 	}
 
+	// markCrossHostAnchor adds target="_blank" + rel="noopener noreferrer" to
+	// any <a> whose href is a cross-host absolute URL. Inside the embedded
+	// viewer this breaks the link out of the iframe into a new browser tab,
+	// keeping the iframe on mirrored content.
+	markCrossHostAnchor := func(n *html.Node) {
+		href := attrValue(n, "href")
+		if href == "" {
+			return
+		}
+		raw := strings.TrimSpace(href)
+		if raw == "" || strings.HasPrefix(raw, "#") {
+			return
+		}
+		lower := strings.ToLower(raw)
+		for _, p := range []string{"mailto:", "tel:", "javascript:", "data:"} {
+			if strings.HasPrefix(lower, p) {
+				return
+			}
+		}
+		u, err := base.Parse(raw)
+		if err != nil || u.Host == "" || strings.EqualFold(u.Host, host) {
+			return
+		}
+		setAttr(n, "target", "_blank")
+		setAttr(n, "rel", "noopener noreferrer")
+	}
+
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
@@ -99,6 +126,9 @@ func RewriteHTML(base *url.URL, body []byte, currentRelPath, host string) []byte
 				if a.Key == "srcset" || a.Key == "imagesrcset" {
 					n.Attr[i].Val = rewriteSrcset(a.Val, rewrite)
 				}
+			}
+			if n.Data == "a" {
+				markCrossHostAnchor(n)
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -132,6 +162,17 @@ func rewriteSrcset(v string, rewrite func(string) string) string {
 		parts[i] = urlPart + rest
 	}
 	return strings.Join(parts, ", ")
+}
+
+// setAttr sets (or overwrites) the named attribute on n.
+func setAttr(n *html.Node, key, value string) {
+	for i, a := range n.Attr {
+		if a.Key == key {
+			n.Attr[i].Val = value
+			return
+		}
+	}
+	n.Attr = append(n.Attr, html.Attribute{Key: key, Val: value})
 }
 
 // relPath returns target expressed relative to fromDir, where both paths use
