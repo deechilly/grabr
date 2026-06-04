@@ -15,9 +15,11 @@ one SQLite file, one data directory, one container.
 ## Table of contents
 
 - [What it does](#what-it-does)
+- [Start command (TL;DR)](#start-command-tldr)
 - [Quick start](#quick-start)
   - [Docker Compose](#docker-compose)
   - [Local Go](#local-go)
+  - [Helper scripts](#helper-scripts)
 - [Configuration](#configuration)
   - [Environment variables](#environment-variables)
   - [Per-site settings](#per-site-settings)
@@ -59,6 +61,38 @@ one SQLite file, one data directory, one container.
 
 ---
 
+## Start command (TL;DR)
+
+If you just want to run it:
+
+```sh
+cp .env.example .env       # then edit .env: set GRABR_ADMIN_USER and GRABR_ADMIN_PASS
+./scripts/up.sh            # build image, start in background, data in named volume
+./scripts/logs.sh          # tail logs
+```
+
+Open <http://localhost:8080/> and sign in with the credentials from `.env`.
+
+To stop while preserving your data:
+
+```sh
+./scripts/down.sh
+```
+
+To stop **and** wipe everything (DB, mirrors, backups — prompts for confirmation):
+
+```sh
+./scripts/reset.sh
+```
+
+For local development without Docker:
+
+```sh
+./scripts/dev.sh           # go run with sane defaults, data in ./data
+```
+
+---
+
 ## Quick start
 
 ### Docker Compose
@@ -66,7 +100,8 @@ one SQLite file, one data directory, one container.
 ```sh
 cp .env.example .env
 # edit .env: set GRABR_ADMIN_USER and GRABR_ADMIN_PASS
-docker compose up --build
+docker compose up -d --build
+docker compose logs -f
 ```
 
 Then open <http://localhost:8080/> and sign in with the credentials you set.
@@ -76,7 +111,19 @@ container).
 To change the published port:
 
 ```sh
-GRABR_PORT=9090 docker compose up --build
+GRABR_PORT=9090 docker compose up -d --build
+```
+
+To stop the service while keeping data:
+
+```sh
+docker compose down
+```
+
+To stop **and** delete the volume (destroys your DB, mirrors, and backups):
+
+```sh
+docker compose down -v
 ```
 
 ### Local Go
@@ -92,10 +139,30 @@ go run ./cmd/grabr
 
 Open <http://localhost:8080/> and sign in.
 
+To build a standalone binary instead of using `go run`:
+
+```sh
+go build -o ./bin/grabr ./cmd/grabr
+GRABR_ADMIN_USER=admin GRABR_ADMIN_PASS=test GRABR_DATA_DIR=./data ./bin/grabr
+```
+
 > **Pick a stable data directory.** If you set `GRABR_DATA_DIR` to a transient
 > path (e.g. `./tmp-data`), nothing inside grabr will clear it, but you might
 > wipe it yourself with `rm -rf` between runs. Use `./data` or a fixed absolute
 > path if you want state to survive.
+
+### Helper scripts
+
+Small wrappers in `scripts/` so you don't have to remember the commands. All
+should be invoked from the repo root.
+
+| Script | What it does |
+| ------ | ------------ |
+| `scripts/dev.sh` | Loads `.env` if present, defaults to `admin/test`, then `go run ./cmd/grabr`. Data goes in `./data`. No Docker required. |
+| `scripts/up.sh` | `docker compose up -d --build`. Refuses to run if `.env` is missing. Forwards extra args to compose. |
+| `scripts/logs.sh` | `docker compose logs -f --tail=100`. Forwards extra args to compose. |
+| `scripts/down.sh` | `docker compose down`. Preserves the named volume (and your data). |
+| `scripts/reset.sh` | **Destructive.** Prompts `yes`, then `docker compose down -v` — deletes the volume, the DB, all mirrors, all backups. |
 
 ---
 
@@ -312,6 +379,7 @@ internal/web/
     static/                    # CSS + bundled htmx.min.js
 Dockerfile
 docker-compose.yml
+scripts/                       # dev.sh, up.sh, logs.sh, down.sh, reset.sh
 ```
 
 ---
@@ -319,13 +387,14 @@ docker-compose.yml
 ## Development
 
 ```sh
-# Build
-go build ./...
+go build ./...               # build all packages
+go vet ./...                 # vet
+./scripts/dev.sh             # run locally (go run, data in ./data)
+```
 
-# Vet
-go vet ./...
+Or directly:
 
-# Run with hot config
+```sh
 GRABR_ADMIN_USER=admin GRABR_ADMIN_PASS=test GRABR_DATA_DIR=./data go run ./cmd/grabr
 ```
 
