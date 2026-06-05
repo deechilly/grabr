@@ -7,19 +7,20 @@ import (
 	"fmt"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 type Store struct {
 	db *sql.DB
 }
 
-func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)")
+func Open(dsn string) (*Store, error) {
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, fmt.Errorf("open postgres: %w", err)
 	}
-	db.SetMaxOpenConns(1) // SQLite + WAL: single writer; keep concurrency simple for now
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		return nil, err
@@ -32,59 +33,55 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) DB() *sql.DB { return s.db }
 
 var migrations = []string{
-	`CREATE TABLE IF NOT EXISTS schema_version (
-		version INTEGER PRIMARY KEY,
-		applied_at TEXT NOT NULL
-	)`,
 	`CREATE TABLE IF NOT EXISTS sites (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		slug TEXT NOT NULL UNIQUE,
-		name TEXT NOT NULL,
-		seed_url TEXT NOT NULL,
-		host TEXT NOT NULL,
+		id              BIGSERIAL PRIMARY KEY,
+		slug            TEXT NOT NULL UNIQUE,
+		name            TEXT NOT NULL,
+		seed_url        TEXT NOT NULL,
+		host            TEXT NOT NULL,
 		interval_seconds INTEGER NOT NULL,
-		respect_robots INTEGER NOT NULL DEFAULT 1,
-		backup_keep_n INTEGER NOT NULL DEFAULT 5,
-		max_concurrent INTEGER NOT NULL DEFAULT 1,
-		rate_limit_rps REAL NOT NULL DEFAULT 1.0,
-		enabled INTEGER NOT NULL DEFAULT 1,
-		created_at TEXT NOT NULL,
-		updated_at TEXT NOT NULL
+		respect_robots  BOOLEAN NOT NULL DEFAULT TRUE,
+		backup_keep_n   INTEGER NOT NULL DEFAULT 5,
+		max_concurrent  INTEGER NOT NULL DEFAULT 1,
+		rate_limit_rps  DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+		enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+		created_at      TIMESTAMPTZ NOT NULL,
+		updated_at      TIMESTAMPTZ NOT NULL
 	)`,
 	`CREATE TABLE IF NOT EXISTS crawls (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-		started_at TEXT NOT NULL,
-		finished_at TEXT,
-		status TEXT NOT NULL,
-		pages_visited INTEGER NOT NULL DEFAULT 0,
+		id               BIGSERIAL PRIMARY KEY,
+		site_id          BIGINT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+		started_at       TIMESTAMPTZ NOT NULL,
+		finished_at      TIMESTAMPTZ,
+		status           TEXT NOT NULL,
+		pages_visited    INTEGER NOT NULL DEFAULT 0,
 		pages_discovered INTEGER NOT NULL DEFAULT 0,
-		bytes_downloaded INTEGER NOT NULL DEFAULT 0,
-		error_message TEXT
+		bytes_downloaded BIGINT NOT NULL DEFAULT 0,
+		error_message    TEXT
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_crawls_site ON crawls(site_id, started_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS visited_urls (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		crawl_id INTEGER NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
-		url TEXT NOT NULL,
-		status_code INTEGER,
+		id           BIGSERIAL PRIMARY KEY,
+		crawl_id     BIGINT NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
+		url          TEXT NOT NULL,
+		status_code  INTEGER,
 		content_type TEXT,
-		bytes INTEGER,
-		fetched_at TEXT,
-		error TEXT
+		bytes        BIGINT,
+		fetched_at   TIMESTAMPTZ,
+		error        TEXT
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_visited_crawl ON visited_urls(crawl_id)`,
 	`CREATE TABLE IF NOT EXISTS robots_logs (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-		fetched_at TEXT NOT NULL,
+		id          BIGSERIAL PRIMARY KEY,
+		site_id     BIGINT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+		fetched_at  TIMESTAMPTZ NOT NULL,
 		status_code INTEGER,
-		content TEXT,
-		error TEXT
+		content     TEXT,
+		error       TEXT
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_robots_site ON robots_logs(site_id, fetched_at DESC)`,
 	`CREATE TABLE IF NOT EXISTS settings (
-		key TEXT PRIMARY KEY,
+		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL
 	)`,
 }
@@ -117,51 +114,62 @@ type Site struct {
 }
 
 func (s *Store) CreateSite(ctx context.Context, site *Site) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.ExecContext(ctx, `
+	now := time.Now().UTC()
+	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO sites (slug, name, seed_url, host, interval_seconds, respect_robots, backup_keep_n, max_concurrent, rate_limit_rps, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id`,
 		site.Slug, site.Name, site.SeedURL, site.Host, site.IntervalSeconds,
-		boolToInt(site.RespectRobots), site.BackupKeepN, site.MaxConcurrent, site.RateLimitRPS,
-		boolToInt(site.Enabled), now, now,
-	)
+		site.RespectRobots, site.BackupKeepN, site.MaxConcurrent, site.RateLimitRPS,
+		site.Enabled, now, now,
+	).Scan(&site.ID)
 	if err != nil {
 		return err
 	}
-	id, _ := res.LastInsertId()
-	site.ID = id
+	site.CreatedAt = now
+	site.UpdatedAt = now
 	return nil
 }
 
 func (s *Store) UpdateSite(ctx context.Context, site *Site) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE sites SET name=?, seed_url=?, host=?, interval_seconds=?, respect_robots=?, backup_keep_n=?, max_concurrent=?, rate_limit_rps=?, enabled=?, updated_at=?
-		WHERE id=?`,
+		UPDATE sites SET name=$1, seed_url=$2, host=$3, interval_seconds=$4, respect_robots=$5,
+		    backup_keep_n=$6, max_concurrent=$7, rate_limit_rps=$8, enabled=$9, updated_at=$10
+		WHERE id=$11`,
 		site.Name, site.SeedURL, site.Host, site.IntervalSeconds,
-		boolToInt(site.RespectRobots), site.BackupKeepN, site.MaxConcurrent, site.RateLimitRPS,
-		boolToInt(site.Enabled), now, site.ID,
+		site.RespectRobots, site.BackupKeepN, site.MaxConcurrent, site.RateLimitRPS,
+		site.Enabled, now, site.ID,
 	)
 	return err
 }
 
 func (s *Store) DeleteSite(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sites WHERE id=?`, id)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sites WHERE id=$1`, id)
 	return err
 }
 
 func (s *Store) GetSite(ctx context.Context, id int64) (*Site, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, slug, name, seed_url, host, interval_seconds, respect_robots, backup_keep_n, max_concurrent, rate_limit_rps, enabled, created_at, updated_at FROM sites WHERE id=?`, id)
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, slug, name, seed_url, host, interval_seconds, respect_robots, backup_keep_n,
+		    max_concurrent, rate_limit_rps, enabled, created_at, updated_at
+		FROM sites WHERE id=$1`, id)
 	return scanSite(row)
 }
 
 func (s *Store) GetSiteBySlug(ctx context.Context, slug string) (*Site, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, slug, name, seed_url, host, interval_seconds, respect_robots, backup_keep_n, max_concurrent, rate_limit_rps, enabled, created_at, updated_at FROM sites WHERE slug=?`, slug)
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, slug, name, seed_url, host, interval_seconds, respect_robots, backup_keep_n,
+		    max_concurrent, rate_limit_rps, enabled, created_at, updated_at
+		FROM sites WHERE slug=$1`, slug)
 	return scanSite(row)
 }
 
 func (s *Store) ListSites(ctx context.Context) ([]*Site, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, slug, name, seed_url, host, interval_seconds, respect_robots, backup_keep_n, max_concurrent, rate_limit_rps, enabled, created_at, updated_at FROM sites ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, slug, name, seed_url, host, interval_seconds, respect_robots, backup_keep_n,
+		    max_concurrent, rate_limit_rps, enabled, created_at, updated_at
+		FROM sites ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -183,19 +191,15 @@ type scanner interface {
 
 func scanSite(r scanner) (*Site, error) {
 	var s Site
-	var respectRobots, enabled int
-	var createdAt, updatedAt string
-	err := r.Scan(&s.ID, &s.Slug, &s.Name, &s.SeedURL, &s.Host, &s.IntervalSeconds, &respectRobots, &s.BackupKeepN, &s.MaxConcurrent, &s.RateLimitRPS, &enabled, &createdAt, &updatedAt)
+	err := r.Scan(&s.ID, &s.Slug, &s.Name, &s.SeedURL, &s.Host, &s.IntervalSeconds,
+		&s.RespectRobots, &s.BackupKeepN, &s.MaxConcurrent, &s.RateLimitRPS,
+		&s.Enabled, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	s.RespectRobots = respectRobots != 0
-	s.Enabled = enabled != 0
-	s.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	s.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return &s, nil
 }
 
@@ -203,7 +207,7 @@ func scanSite(r scanner) (*Site, error) {
 
 func (s *Store) GetSetting(ctx context.Context, key string) (string, bool, error) {
 	var v string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, key).Scan(&v)
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=$1`, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -215,8 +219,8 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, bool, error
 
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO settings (key, value) VALUES (?, ?)
-		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+		INSERT INTO settings (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, key, value)
 	return err
 }
 
@@ -237,7 +241,7 @@ func (s *Store) AllSettings(ctx context.Context) (map[string]string, error) {
 	return out, rows.Err()
 }
 
-// --- Crawl summaries (for landing page) ---
+// --- Crawl summaries ---
 
 type CrawlSummary struct {
 	ID              int64
@@ -253,22 +257,17 @@ type CrawlSummary struct {
 
 func (s *Store) LatestCrawlForSite(ctx context.Context, siteID int64) (*CrawlSummary, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, site_id, started_at, finished_at, status, pages_visited, pages_discovered, bytes_downloaded, COALESCE(error_message,'')
-		FROM crawls WHERE site_id=? ORDER BY started_at DESC LIMIT 1`, siteID)
+		SELECT id, site_id, started_at, finished_at, status, pages_visited, pages_discovered,
+		    bytes_downloaded, COALESCE(error_message,'')
+		FROM crawls WHERE site_id=$1 ORDER BY started_at DESC LIMIT 1`, siteID)
 	var c CrawlSummary
-	var started string
-	var finished sql.NullString
-	err := row.Scan(&c.ID, &c.SiteID, &started, &finished, &c.Status, &c.PagesVisited, &c.PagesDiscovered, &c.BytesDownloaded, &c.ErrorMessage)
+	err := row.Scan(&c.ID, &c.SiteID, &c.StartedAt, &c.FinishedAt, &c.Status,
+		&c.PagesVisited, &c.PagesDiscovered, &c.BytesDownloaded, &c.ErrorMessage)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
-	}
-	c.StartedAt, _ = time.Parse(time.RFC3339, started)
-	if finished.Valid {
-		t, _ := time.Parse(time.RFC3339, finished.String)
-		c.FinishedAt = &t
 	}
 	return &c, nil
 }
@@ -276,45 +275,38 @@ func (s *Store) LatestCrawlForSite(ctx context.Context, siteID int64) (*CrawlSum
 // --- Crawl lifecycle ---
 
 func (s *Store) StartCrawl(ctx context.Context, siteID int64) (int64, error) {
-	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.ExecContext(ctx, `
+	var id int64
+	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO crawls (site_id, started_at, status, pages_visited, pages_discovered, bytes_downloaded)
-		VALUES (?, ?, 'running', 0, 0, 0)`, siteID, now)
-	if err != nil {
-		return 0, err
-	}
-	id, _ := res.LastInsertId()
-	return id, nil
+		VALUES ($1, $2, 'running', 0, 0, 0) RETURNING id`, siteID, time.Now().UTC()).Scan(&id)
+	return id, err
 }
 
 func (s *Store) BumpCrawlProgress(ctx context.Context, crawlID int64, deltaVisited, deltaDiscovered int, deltaBytes int64) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE crawls
-		SET pages_visited = pages_visited + ?,
-		    pages_discovered = pages_discovered + ?,
-		    bytes_downloaded = bytes_downloaded + ?
-		WHERE id=?`, deltaVisited, deltaDiscovered, deltaBytes, crawlID)
+		SET pages_visited    = pages_visited    + $1,
+		    pages_discovered = pages_discovered + $2,
+		    bytes_downloaded = bytes_downloaded + $3
+		WHERE id=$4`, deltaVisited, deltaDiscovered, deltaBytes, crawlID)
 	return err
 }
 
 func (s *Store) FinishCrawl(ctx context.Context, crawlID int64, status, errMsg string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE crawls SET finished_at=?, status=?, error_message=? WHERE id=?`,
-		now, status, errMsg, crawlID)
+		UPDATE crawls SET finished_at=$1, status=$2, error_message=$3 WHERE id=$4`,
+		time.Now().UTC(), status, errMsg, crawlID)
 	return err
 }
 
 func (s *Store) MarkRunningCrawlsAsFailed(ctx context.Context, reason string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE crawls SET finished_at=?, status='failed', error_message=?
-		WHERE status='running'`, now, reason)
+		UPDATE crawls SET finished_at=$1, status='failed', error_message=$2
+		WHERE status='running'`, time.Now().UTC(), reason)
 	return err
 }
 
 func (s *Store) AddRobotsLog(ctx context.Context, siteID int64, statusCode int, content, errMsg string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
 	var statusVal, contentVal, errVal any
 	if statusCode > 0 {
 		statusVal = statusCode
@@ -327,12 +319,11 @@ func (s *Store) AddRobotsLog(ctx context.Context, siteID int64, statusCode int, 
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO robots_logs (site_id, fetched_at, status_code, content, error)
-		VALUES (?, ?, ?, ?, ?)`, siteID, now, statusVal, contentVal, errVal)
+		VALUES ($1, $2, $3, $4, $5)`, siteID, time.Now().UTC(), statusVal, contentVal, errVal)
 	return err
 }
 
 func (s *Store) AddVisitedURL(ctx context.Context, crawlID int64, urlStr string, status int, contentType string, bytes int64, errMsg string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
 	var statusVal, bytesVal, ctVal, errVal any
 	if status > 0 {
 		statusVal = status
@@ -348,13 +339,6 @@ func (s *Store) AddVisitedURL(ctx context.Context, crawlID int64, urlStr string,
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO visited_urls (crawl_id, url, status_code, content_type, bytes, fetched_at, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, crawlID, urlStr, statusVal, ctVal, bytesVal, now, errVal)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, crawlID, urlStr, statusVal, ctVal, bytesVal, time.Now().UTC(), errVal)
 	return err
-}
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }

@@ -15,7 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/deechilly/grabr/internal/config"
-	"github.com/deechilly/grabr/internal/scheduler"
+	"github.com/deechilly/grabr/internal/k8s"
 	"github.com/deechilly/grabr/internal/store"
 )
 
@@ -28,15 +28,15 @@ var staticFS embed.FS
 type Server struct {
 	cfg          *config.Config
 	store        *store.Store
-	scheduler    *scheduler.Scheduler
+	k8s          *k8s.Client // nil if k8s integration is unavailable
 	mirrorsDir   string
 	fragmentTpls *template.Template
 
 	pageMu  sync.RWMutex
-	pageTpl map[string]*template.Template // pageName -> parsed (layout + page)
+	pageTpl map[string]*template.Template
 }
 
-func New(cfg *config.Config, st *store.Store, sched *scheduler.Scheduler, mirrorsDir string) (*Server, error) {
+func New(cfg *config.Config, st *store.Store, kube *k8s.Client, mirrorsDir string) (*Server, error) {
 	frag, err := template.New("").ParseFS(templatesFS, "templates/site_progress.html")
 	if err != nil {
 		return nil, fmt.Errorf("parse fragment templates: %w", err)
@@ -44,7 +44,7 @@ func New(cfg *config.Config, st *store.Store, sched *scheduler.Scheduler, mirror
 	return &Server{
 		cfg:          cfg,
 		store:        st,
-		scheduler:    sched,
+		k8s:          kube,
 		mirrorsDir:   mirrorsDir,
 		fragmentTpls: frag,
 		pageTpl:      map[string]*template.Template{},
@@ -103,8 +103,6 @@ func (s *Server) basicAuth(next http.Handler) http.Handler {
 	})
 }
 
-// pageEnvelope is embedded by every page-specific data struct so the layout can
-// pull .Title/.Nav/.Flash/.FlashKind off the same `.` the content template sees.
 type pageEnvelope struct {
 	Title     string
 	Nav       string
@@ -112,10 +110,6 @@ type pageEnvelope struct {
 	FlashKind string
 }
 
-// renderPage parses layout.html + the named page template (which must contain
-// `{{define "content"}}`) into a fresh template set on first use, caches it,
-// and executes it. Because each page redefines "content", they must live in
-// separate template sets — that's why we don't pre-parse all pages together.
 func (s *Server) renderPage(w http.ResponseWriter, pageFile string, data any) {
 	s.pageMu.RLock()
 	t := s.pageTpl[pageFile]
@@ -126,7 +120,6 @@ func (s *Server) renderPage(w http.ResponseWriter, pageFile string, data any) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// Page may also reference site_progress fragment template.
 		if _, err := parsed.ParseFS(templatesFS, "templates/site_progress.html"); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -221,9 +214,6 @@ func (s *Server) handleMirror(w http.ResponseWriter, r *http.Request) {
 	http.StripPrefix(prefix, serveMirrorFS(root)).ServeHTTP(w, r)
 }
 
-// serveMirrorFS serves files under root, mapping directory paths and
-// extensionless requests to their stored "index.html" representation, which is
-// the layout LocalPathFor produces.
 func serveMirrorFS(root string) http.Handler {
 	fs := http.Dir(root)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -234,7 +224,6 @@ func serveMirrorFS(root string) http.Handler {
 				return
 			}
 		}
-		// Direct file first; fall back to /index.html for extensionless paths.
 		if serveIfExists(w, r, fs, urlPath) {
 			return
 		}

@@ -1,5 +1,6 @@
 /data/
 /grabr
+/bin/
 /tmp/
 /tmp-data/
 *.db
@@ -8,3 +9,4 @@
 *.db-wal
 .DS_Store
 .env
+/k8s/01-secrets.yaml

@@ -1,0 +1,18 @@
+# Shared PVC for mirror files and backups.
+# Mounted read-write by the portal pod and by each crawler Job pod.
+#
+# local-path is the built-in provisioner in k3s and kind.
+# ReadWriteOnce works on a single-node cluster — all pods land on the same node.
+# For multi-node, swap storageClassName for one that supports RWX (nfs-csi, longhorn).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grabr-mirrors
+  namespace: grabr
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi

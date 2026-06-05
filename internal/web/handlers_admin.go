@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/deechilly/grabr/internal/crawler"
 	"github.com/deechilly/grabr/internal/store"
 )
 
@@ -90,10 +92,9 @@ func (s *Server) handleAdminSiteCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if s.scheduler != nil {
-		s.scheduler.Add(site)
-		if site.Enabled {
-			s.scheduler.Kick(site.ID)
+	if s.k8s != nil {
+		if err := s.k8s.EnsureCronJob(site); err != nil {
+			log.Printf("web: EnsureCronJob %s: %v", site.Slug, err)
 		}
 	}
 	redirect(w, r, "/admin/sites", "Site "+site.Name+" created", "")
@@ -126,8 +127,16 @@ func (s *Server) handleAdminSiteUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if s.scheduler != nil {
-		s.scheduler.Update(updated)
+	if s.k8s != nil {
+		// If the slug changed, remove the old CronJob first.
+		if updated.Slug != existing.Slug {
+			if err := s.k8s.DeleteCronJob(existing.Slug); err != nil {
+				log.Printf("web: DeleteCronJob %s: %v", existing.Slug, err)
+			}
+		}
+		if err := s.k8s.EnsureCronJob(updated); err != nil {
+			log.Printf("web: EnsureCronJob %s: %v", updated.Slug, err)
+		}
 	}
 	redirect(w, r, "/admin/sites", "Site "+updated.Name+" updated", "")
 }
@@ -138,12 +147,19 @@ func (s *Server) handleAdminSiteDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", 400)
 		return
 	}
+	site, err := s.store.GetSite(r.Context(), id)
+	if err != nil || site == nil {
+		http.NotFound(w, r)
+		return
+	}
 	if err := s.store.DeleteSite(r.Context(), id); err != nil {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if s.scheduler != nil {
-		s.scheduler.Remove(id)
+	if s.k8s != nil {
+		if err := s.k8s.DeleteCronJob(site.Slug); err != nil {
+			log.Printf("web: DeleteCronJob %s: %v", site.Slug, err)
+		}
 	}
 	redirect(w, r, "/admin/sites", "Site deleted", "")
 }
@@ -158,11 +174,9 @@ func (s *Server) handleAdminSiteTogglePause(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	if s.scheduler != nil {
-		s.scheduler.Update(site)
-		if !site.Enabled {
-			// Pausing also cancels any in-flight crawl.
-			s.scheduler.Cancel(site.ID)
+	if s.k8s != nil {
+		if err := s.k8s.SuspendCronJob(site.Slug, !site.Enabled); err != nil {
+			log.Printf("web: SuspendCronJob %s suspend=%v: %v", site.Slug, !site.Enabled, err)
 		}
 	}
 	s.respondSiteCard(w, r, site, "")
@@ -173,18 +187,25 @@ func (s *Server) handleAdminSiteReprocess(w http.ResponseWriter, r *http.Request
 	if site == nil {
 		return
 	}
-	flash := "Reprocess queued for " + site.Name
-	if s.scheduler != nil {
-		stats, accepted, err := s.scheduler.Reprocess(r.Context(), site.ID)
-		switch {
-		case err != nil:
-			flash = "Reprocess failed: " + err.Error()
-		case !accepted:
-			flash = "Reprocess skipped — a crawl is already running"
-		default:
-			flash = fmt.Sprintf("Reprocessed %d HTML file(s) (changed %d of %d scanned)",
-				stats.HTML, stats.Changed, stats.Scanned)
-		}
+
+	// Check if a crawl is already running via the DB (source of truth in k8s mode).
+	latest, _ := s.store.LatestCrawlForSite(r.Context(), site.ID)
+	if latest != nil && latest.Status == "running" {
+		s.respondSiteCard(w, r, site, "Reprocess skipped — a crawl is already running")
+		return
+	}
+
+	mirrorRoot := s.mirrorsDir + "/" + site.Slug
+	stats, err := crawler.ReprocessMirror(r.Context(), mirrorRoot, site.Host)
+	log.Printf("web: reprocess site %d (%s) scanned=%d html=%d changed=%d err=%v",
+		site.ID, site.Slug, stats.Scanned, stats.HTML, stats.Changed, err)
+
+	var flash string
+	if err != nil {
+		flash = "Reprocess failed: " + err.Error()
+	} else {
+		flash = fmt.Sprintf("Reprocessed %d HTML file(s) (changed %d of %d scanned)",
+			stats.HTML, stats.Changed, stats.Scanned)
 	}
 	s.respondSiteCard(w, r, site, flash)
 }
@@ -194,10 +215,56 @@ func (s *Server) handleAdminSiteCancel(w http.ResponseWriter, r *http.Request) {
 	if site == nil {
 		return
 	}
-	if s.scheduler != nil {
-		s.scheduler.Cancel(site.ID)
+
+	latest, _ := s.store.LatestCrawlForSite(r.Context(), site.ID)
+
+	if s.k8s != nil {
+		if err := s.k8s.DeleteJobsByLabel(site.Slug); err != nil {
+			log.Printf("web: DeleteJobsByLabel %s: %v", site.Slug, err)
+		}
 	}
+
+	// Mark the running crawl row as cancelled immediately so the UI reflects
+	// it without waiting for the pod to drain.
+	if latest != nil && latest.Status == "running" {
+		if err := s.store.FinishCrawl(r.Context(), latest.ID, "cancelled", "cancelled via UI"); err != nil {
+			log.Printf("web: FinishCrawl %d: %v", latest.ID, err)
+		}
+	}
+
 	s.respondSiteCard(w, r, site, "Crawl cancelled for "+site.Name)
+}
+
+func (s *Server) handleAdminSiteCrawlNow(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad id", 400)
+		return
+	}
+	site, err := s.store.GetSite(r.Context(), id)
+	if err != nil || site == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	flash := "Crawl queued for " + site.Name
+	if s.k8s != nil {
+		if jobName, err := s.k8s.CreateCrawlJob(site); err != nil {
+			log.Printf("web: CreateCrawlJob %s: %v", site.Slug, err)
+			flash = "Failed to create crawl job: " + err.Error()
+		} else {
+			log.Printf("web: created crawl job %s for site %s", jobName, site.Slug)
+		}
+	} else {
+		flash = "Kubernetes integration not available"
+	}
+
+	if r.Header.Get("HX-Request") == "true" {
+		latest, _ := s.store.LatestCrawlForSite(r.Context(), site.ID)
+		s.renderFragment(w, "site_progress", buildSiteCardVM(site, latest))
+		return
+	}
+	redirect(w, r, "/", flash, "")
 }
 
 func (s *Server) lookupSite(w http.ResponseWriter, r *http.Request) *store.Site {
@@ -218,8 +285,6 @@ func (s *Server) lookupSite(w http.ResponseWriter, r *http.Request) *store.Site 
 	return site
 }
 
-// respondSiteCard returns either the refreshed HTMX card fragment or a redirect
-// back to the index with an optional flash, depending on the request type.
 func (s *Server) respondSiteCard(w http.ResponseWriter, r *http.Request, site *store.Site, flash string) {
 	if r.Header.Get("HX-Request") == "true" {
 		latest, _ := s.store.LatestCrawlForSite(r.Context(), site.ID)
@@ -230,30 +295,6 @@ func (s *Server) respondSiteCard(w http.ResponseWriter, r *http.Request, site *s
 		flash = "Updated"
 	}
 	redirect(w, r, "/", flash, "")
-}
-
-func (s *Server) handleAdminSiteCrawlNow(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "bad id", 400)
-		return
-	}
-	site, err := s.store.GetSite(r.Context(), id)
-	if err != nil || site == nil {
-		http.NotFound(w, r)
-		return
-	}
-	if s.scheduler != nil {
-		s.scheduler.Kick(site.ID)
-	}
-	// If invoked from HTMX, return the refreshed card fragment so the badge
-	// flips to "running" immediately. Otherwise redirect back.
-	if r.Header.Get("HX-Request") == "true" {
-		latest, _ := s.store.LatestCrawlForSite(r.Context(), site.ID)
-		s.renderFragment(w, "site_progress", buildSiteCardVM(site, latest))
-		return
-	}
-	redirect(w, r, "/", "Crawl queued for "+site.Name, "")
 }
 
 func (s *Server) parseSiteForm(r *http.Request, into *store.Site) (*store.Site, error) {
@@ -372,6 +413,7 @@ func coalesce(v, def string) string {
 	}
 	return v
 }
+
 func coalesceInt(v string, def int) int {
 	if v == "" {
 		return def
