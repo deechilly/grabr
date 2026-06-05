@@ -7,21 +7,21 @@ the previous mirror as a `tar.gz` before each new crawl, and serve the mirrored
 content back to you at `/sites/{slug}/...`.
 
 It's designed to be polite to the sites it crawls (adaptive rate limiting, optional
-robots.txt enforcement) and small enough to understand end-to-end: one Go binary,
-one SQLite file, one data directory, one container.
+robots.txt enforcement) and small enough to understand end-to-end: one Go binary
+with three subcommands (`serve`, `crawl`, `migrate`), a Postgres database, a shared
+PVC for mirror/backup files, and a Kubernetes namespace tying them together.
 
 ---
 
 ## Table of contents
 
 - [What it does](#what-it-does)
-- [Start command (TL;DR)](#start-command-tldr)
+- [Architecture](#architecture)
 - [Quick start](#quick-start)
-  - [Docker Compose](#docker-compose)
-  - [Local Go](#local-go)
+  - [Deploy to k3s](#deploy-to-k3s)
   - [Helper scripts](#helper-scripts)
 - [Configuration](#configuration)
-  - [Environment variables](#environment-variables)
+  - [Environment / Secret values](#environment--secret-values)
   - [Per-site settings](#per-site-settings)
   - [Global settings](#global-settings)
 - [Admin UI tour](#admin-ui-tour)
@@ -64,125 +64,122 @@ one SQLite file, one data directory, one container.
 
 ---
 
-## Start command (TL;DR)
+## Architecture
 
-If you just want to run it:
+grabr runs as one Go binary with three subcommands:
 
-```sh
-cp .env.example .env       # then edit .env: set GRABR_ADMIN_USER and GRABR_ADMIN_PASS
-./scripts/up.sh            # build image, start in background, data in named volume
-./scripts/logs.sh          # tail logs
+- `grabr serve` — the **portal**. Long-running Deployment. Renders the admin
+  UI, serves `/sites/{slug}/...` mirror traffic, and writes/updates a
+  `CronJob` per configured site via the Kubernetes API.
+- `grabr crawl --site-id N` — a **one-shot crawl**. Runs inside short-lived
+  Jobs (one per scheduled fire, plus one per "Crawl now" click). Talks to
+  Postgres for state and writes mirror files to the shared PVC.
+- `grabr migrate --sqlite … --postgres …` — a one-off migration tool for
+  moving an older SQLite-backed install into the new Postgres database.
+
+The portal does **not** run crawls in-process. Scheduling is handled entirely
+by k8s — the portal just reconciles a per-site CronJob and lets the cluster
+fire Jobs. Pause = `suspend=true` on the CronJob. Cancel = delete the Job(s).
+
+```
+                ┌──────────────────────────────┐
+                │  grabr-portal (Deployment)   │
+                │  - admin UI / mirror server  │
+                │  - PATCH/POST CronJobs       │
+                └─────────────┬────────────────┘
+                              │ k8s API
+                ┌─────────────▼────────────────┐
+                │  CronJob/Job per site        │
+                │   args: ["crawl",            │
+                │     "--site-id","N"]         │
+                └──────────────────────────────┘
+                  │                       │
+                  ▼                       ▼
+            ┌──────────┐           ┌──────────────┐
+            │ Postgres │           │ PVC (RWO)    │
+            │ (state)  │           │ mirrors/     │
+            │          │           │ backups/     │
+            └──────────┘           └──────────────┘
 ```
 
-Open <http://localhost:8080/> and sign in with the credentials from `.env`.
-
-To stop while preserving your data:
-
-```sh
-./scripts/down.sh
-```
-
-To stop **and** wipe everything (DB, mirrors, backups — prompts for confirmation):
-
-```sh
-./scripts/reset.sh
-```
-
-For local development without Docker:
-
-```sh
-./scripts/dev.sh           # go run with sane defaults, data in ./data
-```
+State lives in two places: a Postgres StatefulSet (sites, crawl history,
+robots logs, settings) and a single PersistentVolumeClaim mounted by both
+the portal and every crawl Job (`/data/mirrors`, `/data/backups`).
 
 ---
 
 ## Quick start
 
-### Docker Compose
+### Deploy to k3s
+
+The repo ships a single deploy script that targets a remote linux box over
+SSH and stands up k3s + Postgres + the portal end-to-end.
 
 ```sh
 cp .env.example .env
-# edit .env: set GRABR_ADMIN_USER and GRABR_ADMIN_PASS
-docker compose up -d --build
-docker compose logs -f
+# edit .env and set NAS_HOST=user@your-target-ip
+
+cp k8s/01-secrets.yaml.example k8s/01-secrets.yaml
+# edit k8s/01-secrets.yaml and fill in admin credentials + Postgres password
+
+./scripts/k3s-setup.sh
 ```
 
-Then open <http://localhost:8080/> and sign in with the credentials you set.
-Data persists in the named volume `grabr-data` (mounted at `/data` in the
-container).
+The script will, on the target box:
 
-To change the published port:
+1. Install k3s (skipped if already installed).
+2. Fetch a kubeconfig and write it to `~/.kube/config-grabr`.
+3. Apply the manifests in `k8s/` (namespace, secrets, PVC, Postgres, portal).
+4. Cross-compile the grabr binary for `linux/amd64`, wrap it in a distroless
+   image, and import it into the k3s containerd image store.
+5. Roll out the portal Deployment and wait for it to become Ready.
+
+When it's done, the portal is reachable at `http://<target-ip>:30080`. Sign
+in with the admin credentials from `k8s/01-secrets.yaml`.
+
+To **redeploy after code changes**, just re-run the script. It will rebuild
+the binary, re-import the image, and `kubectl rollout restart` the portal.
+
+To also migrate an older SQLite-backed install during the first deploy, run
+with `--migrate`. The script will SCP the grabr binary to the target,
+port-forward Postgres, and stream files into the PVC via a temporary alpine
+sidecar pod.
 
 ```sh
-GRABR_PORT=9090 docker compose up -d --build
+./scripts/k3s-setup.sh --migrate
 ```
-
-To stop the service while keeping data:
-
-```sh
-docker compose down
-```
-
-To stop **and** delete the volume (destroys your DB, mirrors, and backups):
-
-```sh
-docker compose down -v
-```
-
-### Local Go
-
-Requires Go 1.26+.
-
-```sh
-GRABR_ADMIN_USER=admin \
-GRABR_ADMIN_PASS=change-me \
-GRABR_DATA_DIR=./data \
-go run ./cmd/grabr
-```
-
-Open <http://localhost:8080/> and sign in.
-
-To build a standalone binary instead of using `go run`:
-
-```sh
-go build -o ./bin/grabr ./cmd/grabr
-GRABR_ADMIN_USER=admin GRABR_ADMIN_PASS=test GRABR_DATA_DIR=./data ./bin/grabr
-```
-
-> **Pick a stable data directory.** If you set `GRABR_DATA_DIR` to a transient
-> path (e.g. `./tmp-data`), nothing inside grabr will clear it, but you might
-> wipe it yourself with `rm -rf` between runs. Use `./data` or a fixed absolute
-> path if you want state to survive.
 
 ### Helper scripts
 
-Small wrappers in `scripts/` so you don't have to remember the commands. All
-should be invoked from the repo root.
-
 | Script | What it does |
 | ------ | ------------ |
-| `scripts/dev.sh` | Loads `.env` if present, defaults to `admin/test`, then `go run ./cmd/grabr`. Data goes in `./data`. No Docker required. |
-| `scripts/up.sh` | `docker compose up -d --build`. Refuses to run if `.env` is missing. Forwards extra args to compose. |
-| `scripts/logs.sh` | `docker compose logs -f --tail=100`. Forwards extra args to compose. |
-| `scripts/down.sh` | `docker compose down`. Preserves the named volume (and your data). |
-| `scripts/reset.sh` | **Destructive.** Prompts `yes`, then `docker compose down -v` — deletes the volume, the DB, all mirrors, all backups. |
+| `scripts/k3s-setup.sh` | The deploy script described above. Accepts `--migrate` and `--reinstall` (destructive: wipes k3s on the target). |
+| `scripts/k9s.sh` | Thin wrapper around `k9s` using the kubeconfig from `k3s-setup.sh`, landing in the `grabr` namespace. Requires `brew install k9s`. |
 
 ---
 
 ## Configuration
 
-### Environment variables
+### Environment / Secret values
 
-| Variable | Default | Description |
-| -------- | ------- | ----------- |
-| `GRABR_ADMIN_USER` | *required* | Basic-auth username for every page on the service. |
-| `GRABR_ADMIN_PASS` | *required* | Basic-auth password. |
-| `GRABR_PORT` | `8080` | Port the HTTP server binds to (the listener is `:GRABR_PORT`). |
-| `GRABR_DATA_DIR` | `./data` | Root data directory. Contains `grabr.db`, `mirrors/`, and `backups/`. |
-| `GRABR_DEFAULT_INTERVAL_SECONDS` | `86400` | Default crawl interval applied to newly-created sites. |
-| `GRABR_DEFAULT_BACKUP_KEEP_N` | `5` | Default backup retention count applied to newly-created sites. |
+All of the following are injected into the portal pod as Kubernetes Secret
+references (see `k8s/01-secrets.yaml.example`). They're listed here as env
+vars because that's what `grabr serve` actually reads — but at deploy time
+they live in a Secret, not in `.env`.
 
-The service refuses to start without `GRABR_ADMIN_USER` and `GRABR_ADMIN_PASS`.
+| Variable | Required | Description |
+| -------- | -------- | ----------- |
+| `GRABR_ADMIN_USER` | yes | Basic-auth username for every page on the service. |
+| `GRABR_ADMIN_PASS` | yes | Basic-auth password. |
+| `GRABR_DATABASE_URL` | yes | Postgres DSN. The in-cluster default is `postgres://grabr:…@postgres.grabr.svc.cluster.local:5432/grabr?sslmode=disable`. |
+| `GRABR_NAMESPACE` | no (`grabr`) | Kubernetes namespace the portal manages CronJobs/Jobs in. |
+| `GRABR_CRAWLER_IMAGE` | yes (in-cluster) | Container image used for crawler CronJob/Job pods. Same image as the portal. |
+| `GRABR_PORT` | no (`8080`) | Port the HTTP server binds to. |
+| `GRABR_DATA_DIR` | no (`/data`) | Root data directory. Contains `mirrors/` and `backups/`. Mounted from the shared PVC. |
+
+The portal refuses to start without `GRABR_ADMIN_USER`, `GRABR_ADMIN_PASS`,
+and `GRABR_DATABASE_URL`. For local Kubernetes-less dev (`go run`), set them
+yourself and stand up Postgres separately — see `cmd/grabr/serve.go`.
 
 ### Per-site settings
 
@@ -193,7 +190,7 @@ Set in the admin UI when adding or editing a site:
 | **Display name** | Free-form. Shown on the landing page. |
 | **Slug** | Lowercase letters, digits, dashes. Used in URLs (`/sites/{slug}/`) and as the on-disk directory name. |
 | **Seed URL** | Absolute `http://` or `https://` URL. The crawl starts here; only same-host URLs reachable from it are followed. |
-| **Crawl interval (seconds)** | Minimum 60. The scheduler kicks a crawl every interval seconds (and once immediately on create). |
+| **Crawl interval (seconds)** | Minimum 60. Translated to a cron expression on the site's CronJob — the closest divisor of the surrounding unit (minutes, hours, or days). Non-divisor intervals (e.g. 17 min) don't fire on a strict cadence because `*/N` resets at unit boundaries. |
 | **Backups to keep** | Rolling retention; older `tar.gz` snapshots are pruned after each crawl. |
 | **Initial rate limit (rps)** | Starting requests-per-second. The adaptive controller ramps up or down from here. |
 | **Max concurrent fetches** | Ceiling for future concurrency widening. (The current crawler is single-worker; widening is planned.) |
@@ -241,10 +238,10 @@ Per-site card buttons:
 
 | Button | Visible when | Action |
 | ------ | ------------ | ------ |
-| **Crawl now** | Site is enabled and not currently crawling | Kicks a crawl immediately. Goes through the same overlap-skip lock as scheduled runs (a kick during an in-flight crawl is dropped with a warning). |
-| **Pause** | Site is enabled | Disables the schedule and cancels any in-flight crawl. |
-| **Resume** | Site is paused | Re-enables the schedule. |
-| **Cancel** | A crawl is in flight | Interrupts the running crawl; the crawl row is finalized with `status=cancelled`. |
+| **Crawl now** | Site is enabled and not currently crawling | Creates a manual `Job` (separate from the CronJob) that runs `grabr crawl --site-id N`. The CronJob's `concurrencyPolicy: Forbid` plus a DB-level "is anything running" check prevent overlap with a scheduled fire. |
+| **Pause** | Site is enabled | Sets `spec.suspend=true` on the site's CronJob and deletes any in-flight Job for the site. |
+| **Resume** | Site is paused | Clears `spec.suspend` on the CronJob. |
+| **Cancel** | A crawl is in flight | Deletes all Jobs labelled with this site's slug and marks the running `crawls` row as `cancelled`. |
 | **Reprocess** | Crawl is not in flight | Re-runs the HTML rewriter (link rewriting + analytics stripping) on the existing mirror with no re-download. See [Reprocessing](#reprocessing-an-existing-mirror). |
 | **Edit** | always | Goes to the site form. |
 
@@ -415,8 +412,8 @@ served mirror without further intervention.
 
 ## Data model
 
-SQLite, kept simple. All time columns store RFC3339 UTC strings. Booleans
-are stored as `0` / `1` integers.
+Postgres, kept simple. Time columns are `TIMESTAMPTZ`. Booleans are real
+`BOOLEAN`s.
 
 - **`sites`** — one row per configured site. Persistent.
 - **`crawls`** — one row per crawl attempt. Holds running counters
@@ -428,20 +425,28 @@ are stored as `0` / `1` integers.
 - **`robots_logs`** — one row per robots.txt fetch. The raw body is
   preserved.
 - **`settings`** — key/value store for global settings.
-- **`schema_version`** — reserved for future migrations.
 
-On startup, any crawl rows in `status='running'` are marked `failed` with
-`error_message='interrupted by restart'` — grabr does not resume mid-flight
-crawls, by design.
+On portal startup, every crawl row in `status='running'` is reconciled
+against k8s: if there is no active Job for the site's slug, the row is
+finalized with `status='failed'` and `error_message='interrupted by
+restart'`. Rows whose Jobs are still running are left alone — the crawl pod
+will write its own `FinishCrawl` when it completes.
 
 ---
 
 ## Project layout
 
 ```
-cmd/grabr/main.go              # entrypoint: config, store, scheduler, HTTP, signals
+cmd/grabr/
+    main.go                    # subcommand dispatcher (serve | crawl | migrate)
+    serve.go                   # portal: HTTP server + reconcile loop
+    crawl.go                   # one-shot crawl runner (used by Job pods)
+    migrate.go                 # SQLite → Postgres migration tool
+    dirs.go                    # shared mirrors_dir / backups_dir resolver
+    signals.go                 # SIGINT/SIGTERM → context.Context
 internal/config/               # env loader + path resolution
-internal/store/                # SQLite open/migrate + typed CRUD
+internal/store/                # Postgres pool + typed CRUD (pgx/v5)
+internal/k8s/                  # client-go-free k8s API client (CronJob/Job CRUD)
 internal/crawler/
     crawler.go                 # per-site orchestrator (Run)
     fetcher.go                 # adaptive rate-limited HTTP client
@@ -449,19 +454,23 @@ internal/crawler/
     rewriter.go                # same-host URL rewriting
     analytics.go               # analytics/tracker stripping
     reprocess.go               # offline re-run of the rewriter on an existing mirror
-    robots.go                  # robots.txt fetch + parse + Allowed/CrawlDelay
-    writer.go                  # URL -> on-disk path mapper + atomic writer
 internal/backup/               # tar.gz pre-crawl snapshots + retention prune
-internal/scheduler/            # per-site goroutines, locks, kick/cancel API
 internal/web/
-    server.go                  # chi router, basic-auth, mirror file server
+    server.go                  # chi router, basic-auth, mirror file server, /healthz
     handlers_index.go          # landing + progress fragment
     handlers_admin.go          # CRUD + settings + crawl-now/pause/cancel
     templates/                 # html/template files
     static/                    # CSS + bundled htmx.min.js
-Dockerfile
-docker-compose.yml
-scripts/                       # dev.sh, up.sh, logs.sh, down.sh, reset.sh
+k8s/
+    00-namespace.yaml
+    01-secrets.yaml.example    # copy to 01-secrets.yaml and fill in
+    02-storage.yaml            # PVC for /data
+    03-postgres.yaml           # StatefulSet + Service
+    04-portal.yaml             # Deployment + Service + RBAC
+Dockerfile.prebuilt            # wraps bin/grabr-linux in distroless
+scripts/
+    k3s-setup.sh               # end-to-end deploy to a remote k3s node
+    k9s.sh                     # k9s wrapper using the fetched kubeconfig
 ```
 
 ---
@@ -471,41 +480,61 @@ scripts/                       # dev.sh, up.sh, logs.sh, down.sh, reset.sh
 ```sh
 go build ./...               # build all packages
 go vet ./...                 # vet
-./scripts/dev.sh             # run locally (go run, data in ./data)
+go test ./...                # tests (only internal/crawler currently has any)
 ```
 
-Or directly:
+To iterate on the Go code without redeploying to k3s, stand up Postgres
+yourself (locally or via the in-cluster one with `kubectl port-forward
+svc/postgres 5432:5432 -n grabr`) and run:
 
 ```sh
-GRABR_ADMIN_USER=admin GRABR_ADMIN_PASS=test GRABR_DATA_DIR=./data go run ./cmd/grabr
+GRABR_ADMIN_USER=admin \
+GRABR_ADMIN_PASS=test \
+GRABR_DATABASE_URL=postgres://grabr:test@127.0.0.1:5432/grabr?sslmode=disable \
+GRABR_DATA_DIR=./data \
+go run ./cmd/grabr serve
 ```
 
-The SQLite driver is `modernc.org/sqlite` (pure Go, no CGO). The Docker image
-builds as a static binary with `CGO_ENABLED=0` and runs on `distroless/static`.
+Note that without `GRABR_K8S_*` env vars or in-cluster credentials, the k8s
+integration is disabled — the portal will start and render the UI, but
+Crawl-now and scheduling won't actually create anything.
 
-Templates and static assets are embedded into the binary via `//go:embed`, so
-the deployed binary needs nothing alongside it except the data directory.
+The Postgres driver is `pgx/v5` (`stdlib`). The deployed image is
+distroless `static-debian12:nonroot` wrapping a cross-compiled binary
+(`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`). Templates and static assets are
+embedded via `//go:embed`, so the binary needs nothing alongside it except
+the data directory.
 
 ---
 
 ## Operational notes
 
-- **Signals.** `SIGINT` and `SIGTERM` trigger a graceful shutdown: HTTP server
-  drains, scheduler stops (cancelling in-flight crawls), SQLite closes (which
-  checkpoints the WAL). On the next start, any `running` crawls are marked
-  `failed` as described above.
-- **Concurrency model.** Each site has its own goroutine inside the scheduler
-  with its own ticker and a buffered kick channel. Only one crawl per site can
-  be in flight at a time (overlap-skip lock). Crawls themselves are currently
-  single-worker; the `max_concurrent` setting is plumbed through for a future
-  widening pass.
-- **Restart safety.** SQLite is opened in WAL mode with a 5s busy timeout, with
-  `max_open_conns=1` to keep the driver's connection behavior predictable
-  alongside per-site goroutines.
+- **Signals.** Both `grabr serve` and `grabr crawl` translate `SIGINT` /
+  `SIGTERM` into a `context.Context` cancellation. The portal drains the
+  HTTP server before exiting; crawl Jobs interrupt the active fetch loop.
+- **Concurrency model.** Each site has a `CronJob` with
+  `concurrencyPolicy: Forbid` and `backoffLimit: 0`, so a scheduled fire
+  while an earlier crawl is still running is skipped by k8s. Manual
+  "Crawl now" creates a separate `Job` and is additionally gated by a
+  DB-level "is anything running for this site" check. Crawls themselves
+  are currently single-worker; the `max_concurrent` setting is plumbed
+  through for a future widening pass.
+- **Reconcile on restart.** When the portal starts, every `crawls` row in
+  `status='running'` is checked against the cluster. Rows whose Jobs no
+  longer exist are flipped to `failed`; rows with an active Job are left
+  alone (the crawl pod will eventually call `FinishCrawl`).
+- **Storage.** Mirrors and backups live on a single `ReadWriteOnce` PVC
+  (default `grabr-mirrors`, 20Gi, `local-path`). Both the portal and every
+  crawl Job mount it at `/data`. Single-node deploys are fine; multi-node
+  needs an `RWX` storage class (longhorn, nfs-csi, …).
 - **Storage growth.** Each crawl writes a fresh full mirror under
   `mirrors/<slug>/` (no incremental diff) and creates a `tar.gz` backup.
   Plan disk capacity for `(mirror size) + N * (compressed mirror size)` per
   site, where N is `backup_keep_n`.
+- **Image distribution.** `scripts/k3s-setup.sh` cross-compiles locally,
+  builds the image with `--platform linux/amd64`, and pipes `docker save`
+  through SSH into the target's k3s containerd image store. Manifests use
+  `imagePullPolicy: Never` to match. No external registry is involved.
 - **Be a good citizen.** Even with adaptive rate limiting, crawling at high
   RPS against a single host is rude. The defaults (1 RPS initial, 20 RPS hard
   cap, respect robots.txt) are deliberately conservative. Don't raise them
@@ -525,7 +554,7 @@ Implemented:
 - Reprocess action to re-run the rewriter on an existing mirror without re-downloading
 - Mirror serving at `/sites/{slug}/...`
 - Pause/Resume schedule + Cancel in-flight
-- Kick-on-create and manual "Crawl now"
+- Manual "Crawl now"
 - Pre-crawl `tar.gz` backups with per-site retention
 - Per-site progress fragment polled via HTMX
 
@@ -543,5 +572,9 @@ Not yet implemented:
 - **robots.txt log viewer.** Rows are written; no page yet to inspect them.
 - **Multi-host crawl scope** (e.g. follow subdomains). Currently same-host
   exact match only.
+- **Kick-on-create.** The pre-k8s scheduler fired an immediate crawl when a
+  site was added. The current k8s flow just creates a CronJob and waits for
+  the first scheduled fire. Restoring this is a one-line addition in the
+  create handler (`k8s.CreateCrawlJob`).
 
 PRs welcome.
