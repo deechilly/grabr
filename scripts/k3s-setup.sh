@@ -14,7 +14,7 @@
 #
 # Prerequisites (local machine):
 #   - kubectl, ssh, tar, go, docker (Docker Desktop / OrbStack / colima all work)
-#   - SSH key access to $NAS_HOST (default: root@192.168.1.7)
+#   - SSH key access to $NAS_HOST (e.g. root@your-nas-ip; set in .env)
 #
 # Prerequisites (NAS):
 #   - k3s installed by this script if absent
@@ -25,14 +25,32 @@
 
 set -euo pipefail
 
+# Source project-root .env if present, so NAS_HOST and other deploy vars stay
+# out of version control. .env is in .gitignore; .env.example is the template.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [[ -f "$REPO_ROOT/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$REPO_ROOT/.env"
+    set +a
+fi
+
 # ---- config ----------------------------------------------------------------
-NAS_HOST="${NAS_HOST:-root@192.168.1.7}"
+NAS_HOST="${NAS_HOST:-}"
 NAMESPACE="${GRABR_NAMESPACE:-grabr}"
 IMAGE="${GRABR_IMAGE:-grabr:dev}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-$HOME/.kube/config-grabr}"
 NAS_BUILD_DIR="${NAS_BUILD_DIR:-/tmp/grabr-build}"
 DOCKER_VOLUME_DATA="${DOCKER_VOLUME_DATA:-/var/lib/docker/volumes/grabr_grabr-data/_data}"
 # ----------------------------------------------------------------------------
+
+[[ -n "$NAS_HOST" ]] || {
+    echo "✗ ERROR: NAS_HOST is not set." >&2
+    echo "  Add it to $REPO_ROOT/.env (see .env.example) or export it in your shell," >&2
+    echo "  e.g.  NAS_HOST=root@your-nas-ip ./scripts/k3s-setup.sh" >&2
+    exit 1
+}
 
 MIGRATE=false
 REINSTALL=false
@@ -180,21 +198,48 @@ kill \$PF_PID 2>/dev/null || true
     ok "Database migrated"
 
     # Copy mirrors + backups from the Docker volume into the PVC.
-    # The portal pod already mounts the PVC at /data, so we pipe tar through
-    # kubectl exec — the data goes NAS disk → kubectl exec → PVC, no local copy.
-    PORTAL_POD=$(kubectl get pod -n "$NAMESPACE" -l app=grabr-portal \
-        -o jsonpath='{.items[0].metadata.name}')
+    # The portal image is distroless (no shell, no tar), so we can't exec into
+    # it. Spin up a short-lived alpine pod that mounts the same PVC and stream
+    # tar through it: NAS disk → kubectl exec → tar -x → PVC. No local copy.
+    RSYNC_POD=grabr-migrate-rsync
+    log "Launching temporary $RSYNC_POD pod to receive files..."
+    kubectl delete pod -n "$NAMESPACE" "$RSYNC_POD" --ignore-not-found --wait=true >/dev/null
+    kubectl apply -n "$NAMESPACE" -f - <<EOF >/dev/null
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $RSYNC_POD
+  labels:
+    app.kubernetes.io/managed-by: grabr-migrate
+spec:
+  restartPolicy: Never
+  containers:
+    - name: rsync
+      image: alpine:3.19
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - { name: mirrors, mountPath: /data }
+  volumes:
+    - name: mirrors
+      persistentVolumeClaim:
+        claimName: grabr-mirrors
+EOF
+    kubectl wait pod -n "$NAMESPACE" "$RSYNC_POD" --for=condition=Ready --timeout=120s >/dev/null
+    ok "$RSYNC_POD ready"
 
     for dir in mirrors backups; do
         if nas "test -d '$DOCKER_VOLUME_DATA/$dir'"; then
-            log "Copying $dir/ into PVC via portal pod..."
+            log "Copying $dir/ into PVC via $RSYNC_POD..."
             nas "tar -C '$DOCKER_VOLUME_DATA' -cf - '$dir'" \
-                | kubectl exec -i -n "$NAMESPACE" "$PORTAL_POD" -- tar -C /data -xf -
+                | kubectl exec -i -n "$NAMESPACE" "$RSYNC_POD" -- tar -C /data -xf -
             ok "$dir/ copied"
         else
             log "$dir/ not found on NAS; skipping"
         fi
     done
+
+    log "Removing $RSYNC_POD..."
+    kubectl delete pod -n "$NAMESPACE" "$RSYNC_POD" --ignore-not-found --wait=false >/dev/null
 fi
 
 # ---- 7. Done ---------------------------------------------------------------
