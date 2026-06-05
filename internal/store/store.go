@@ -306,6 +306,34 @@ func (s *Store) MarkRunningCrawlsAsFailed(ctx context.Context, reason string) er
 	return err
 }
 
+// RunningCrawl is a row from the crawls table whose status is 'running',
+// joined with the site's slug so callers can correlate to k8s Jobs.
+type RunningCrawl struct {
+	CrawlID int64
+	SiteID  int64
+	Slug    string
+}
+
+func (s *Store) ListRunningCrawls(ctx context.Context) ([]RunningCrawl, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.id, c.site_id, s.slug
+		FROM crawls c JOIN sites s ON s.id = c.site_id
+		WHERE c.status='running'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RunningCrawl
+	for rows.Next() {
+		var r RunningCrawl
+		if err := rows.Scan(&r.CrawlID, &r.SiteID, &r.Slug); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) AddRobotsLog(ctx context.Context, siteID int64, statusCode int, content, errMsg string) error {
 	var statusVal, contentVal, errVal any
 	if statusCode > 0 {

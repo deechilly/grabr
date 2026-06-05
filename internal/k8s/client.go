@@ -425,6 +425,13 @@ func truncate(s string, n int) string {
 }
 
 // intervalToCron converts a seconds interval to a cron expression.
+//
+// Note: cron `*/N` resets at each unit boundary, so non-divisor intervals
+// don't strictly fire every N units. E.g. `*/17 * * * *` fires at :00, :17,
+// :34, :51 and then jumps to :00 of the next hour (a 9-minute gap). For
+// grabr's typical daily-ish intervals this is acceptable; callers who need
+// strict periodicity should snap their interval to a divisor of the next-larger
+// unit (60, 30, 20, 15, 12, 10, ... minutes; 24, 12, 8, 6, ... hours).
 func intervalToCron(seconds int) string {
 	if seconds < 60 {
 		seconds = 60

@@ -46,7 +46,11 @@ func runCrawl(args []string) error {
 		return errors.New("site not found")
 	}
 
-	backuper := backup.New(cfg.MirrorsDir, cfg.BackupsDir, func(slug string) int {
+	// Honor any mirrors_dir / backups_dir override stored in the settings table
+	// so the portal and crawler pods agree on where files live.
+	mirrorsDir, backupsDir := resolveDirs(st, cfg)
+
+	backuper := backup.New(mirrorsDir, backupsDir, func(slug string) int {
 		s, err := st.GetSiteBySlug(context.Background(), slug)
 		if err != nil || s == nil {
 			return 5
@@ -54,7 +58,7 @@ func runCrawl(args []string) error {
 		return s.BackupKeepN
 	})
 
-	cr := &crawler.Crawler{Store: st, MirrorsDir: cfg.MirrorsDir, Backuper: backuper}
+	cr := &crawler.Crawler{Store: st, MirrorsDir: mirrorsDir, Backuper: backuper}
 
 	log.Printf("crawl: starting site %d (%s)", site.ID, site.Slug)
 	_, status, err := cr.Run(ctx, site)

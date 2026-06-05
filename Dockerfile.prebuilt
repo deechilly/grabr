@@ -1,3 +1,14 @@
+# Wraps a pre-built grabr binary in a distroless base image.
+#
+# Input contract: bin/grabr-linux must exist at the build context root before
+# `docker build -f Dockerfile.prebuilt .` is run. It is produced by:
+#
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+#       go build -trimpath -ldflags="-s -w" -o bin/grabr-linux ./cmd/grabr
+#
+# `scripts/k3s-setup.sh` handles this automatically. The Dockerfile intentionally
+# has no RUN steps so the build does not need a Docker bridge/veth pair — useful
+# on hosts where Docker's default networking is broken.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --chown=nonroot:nonroot bin/grabr-linux /grabr
 USER nonroot:nonroot

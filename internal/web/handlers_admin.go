@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -195,7 +196,7 @@ func (s *Server) handleAdminSiteReprocess(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	mirrorRoot := s.mirrorsDir + "/" + site.Slug
+	mirrorRoot := filepath.Join(s.mirrorsDir, site.Slug)
 	stats, err := crawler.ReprocessMirror(r.Context(), mirrorRoot, site.Host)
 	log.Printf("web: reprocess site %d (%s) scanned=%d html=%d changed=%d err=%v",
 		site.ID, site.Slug, stats.Scanned, stats.HTML, stats.Changed, err)
@@ -218,14 +219,17 @@ func (s *Server) handleAdminSiteCancel(w http.ResponseWriter, r *http.Request) {
 
 	latest, _ := s.store.LatestCrawlForSite(r.Context(), site.ID)
 
+	// Delete the Job(s) first so the pod gets SIGTERM, then flip the DB row.
+	// There is still a small race: the pod's own FinishCrawl can land during
+	// its termination grace period and overwrite 'cancelled' with the
+	// in-flight crawl's final status. The reconcile-on-restart path and the
+	// site card refresh both tolerate that; the UI will reflect whatever the
+	// pod last wrote, which is acceptable for a manual cancel.
 	if s.k8s != nil {
 		if err := s.k8s.DeleteJobsByLabel(site.Slug); err != nil {
 			log.Printf("web: DeleteJobsByLabel %s: %v", site.Slug, err)
 		}
 	}
-
-	// Mark the running crawl row as cancelled immediately so the UI reflects
-	// it without waiting for the pod to drain.
 	if latest != nil && latest.Status == "running" {
 		if err := s.store.FinishCrawl(r.Context(), latest.ID, "cancelled", "cancelled via UI"); err != nil {
 			log.Printf("web: FinishCrawl %d: %v", latest.ID, err)
