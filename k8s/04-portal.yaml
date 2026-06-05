@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grabr-portal
+  namespace: grabr
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: grabr-portal
+  namespace: grabr
+rules:
+  - apiGroups: [batch]
+    resources: [cronjobs, jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: grabr-portal
+  namespace: grabr
+subjects:
+  - kind: ServiceAccount
+    name: grabr-portal
+    namespace: grabr
+roleRef:
+  kind: Role
+  name: grabr-portal
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grabr-portal
+  namespace: grabr
+  labels:
+    app: grabr-portal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grabr-portal
+  template:
+    metadata:
+      labels:
+        app: grabr-portal
+    spec:
+      serviceAccountName: grabr-portal
+      containers:
+        - name: grabr-portal
+          image: grabr:dev   # replace with your registry image
+          imagePullPolicy: Never  # image is imported directly into k3s containerd
+          args: [serve]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: GRABR_PORT
+              value: "8080"
+            - name: GRABR_DATA_DIR
+              value: /data
+            - name: GRABR_NAMESPACE
+              value: grabr
+            - name: GRABR_CRAWLER_IMAGE
+              value: grabr:dev   # image used for crawler CronJob/Job pods
+            - name: GRABR_ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: grabr-credentials
+                  key: GRABR_ADMIN_USER
+            - name: GRABR_ADMIN_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: grabr-credentials
+                  key: GRABR_ADMIN_PASS
+            - name: GRABR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: grabr-db
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: mirrors
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: mirrors
+          persistentVolumeClaim:
+            claimName: grabr-mirrors
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grabr-portal
+  namespace: grabr
+spec:
+  selector:
+    app: grabr-portal
+  type: NodePort
+  ports:
+    - port: 8080
+      targetPort: 8080
+      nodePort: 30080   # access via http://<node-ip>:30080
