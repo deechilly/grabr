@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# k3s-setup.sh — deploy grabr to a remote Arch Linux box via SSH using k3s.
+# k3s-setup.sh — deploy grabr to a remote linux box via SSH using k3s.
 #
-# The image is built on the NAS (avoids local Docker bridge issues), then
-# piped directly into k3s containerd. No local Docker required.
+# The grabr binary is cross-compiled to linux/amd64 on the local machine and
+# wrapped in a distroless image using Dockerfile.prebuilt. The Dockerfile has
+# no RUN steps so Docker never spins up a container — useful on hosts where
+# the Docker default bridge is broken. The resulting image is streamed over
+# SSH into k3s' containerd image store on the target node.
 #
 # Usage:
 #   ./scripts/k3s-setup.sh              # deploy / update image + manifests
@@ -10,17 +13,13 @@
 #   ./scripts/k3s-setup.sh --reinstall  # wipe k3s and start fresh (DESTRUCTIVE)
 #
 # Prerequisites (local machine):
-#   - kubectl, ssh, tar, go, docker
-#   - SSH key access: ssh root@192.168.1.7
+#   - kubectl, ssh, tar, go, docker (Docker Desktop / OrbStack / colima all work)
+#   - SSH key access to $NAS_HOST (default: root@192.168.1.7)
 #
 # Prerequisites (NAS):
-#   - docker (pacman -S docker && systemctl enable --now docker)
-#   - go     (pacman -S go)   — only needed for --migrate
-#
-# The image is built locally using Dockerfile.prebuilt (no RUN commands, so no
-# Docker container is created and no bridge/veth setup is required). The binary
-# is cross-compiled with go build, wrapped in distroless, then piped into the
-# NAS k3s containerd.
+#   - k3s installed by this script if absent
+#   - No other tooling required; --migrate copies the grabr binary over via scp
+#     and runs it against a port-forwarded postgres
 #
 # Credentials: fill in k8s/01-secrets.yaml from k8s/01-secrets.yaml.example
 
@@ -120,11 +119,19 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 ok "Binary compiled → bin/grabr-linux"
 
 log "Building image $IMAGE (Dockerfile.prebuilt, no RUN steps)..."
-docker build -f Dockerfile.prebuilt -t "$IMAGE" .
+# --platform linux/amd64 is required on Apple Silicon: docker defaults to the
+# host arch, which would produce an arm64 image that an amd64 k3s node refuses
+# to schedule with ErrImageNeverPull. Harmless on amd64 hosts.
+docker build --platform linux/amd64 -f Dockerfile.prebuilt -t "$IMAGE" .
 ok "Image built"
 
 log "Importing image into k3s containerd on $NAS_HOST..."
+# Pipe directly into k3s' bundled containerd (namespace k8s.io, the default
+# for `k3s ctr`). Then tag the unqualified alias so the manifest's
+# `image: grabr:dev` matches a registered name — without the alias the kubelet
+# fails with ErrImageNeverPull when imagePullPolicy=Never.
 docker save "$IMAGE" | ssh "$NAS_HOST" "k3s ctr images import -"
+ssh "$NAS_HOST" "k3s ctr images tag --force docker.io/library/$IMAGE $IMAGE >/dev/null"
 ok "Image $IMAGE imported"
 
 # ---- 5. Roll out portal ----------------------------------------------------
@@ -191,7 +198,9 @@ kill \$PF_PID 2>/dev/null || true
 fi
 
 # ---- 7. Done ---------------------------------------------------------------
-NODE_IP=$(nas 'hostname -I | awk "{print \$1}"')
+# Derive node IP from $NAS_HOST rather than asking the NAS — `hostname` is not
+# always on PATH for non-login SSH sessions.
+NODE_IP="${NAS_HOST#*@}"
 echo ""
 ok "Deployment complete!"
 echo ""
