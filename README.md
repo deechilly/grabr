@@ -554,7 +554,7 @@ Implemented:
 - Reprocess action to re-run the rewriter on an existing mirror without re-downloading
 - Mirror serving at `/sites/{slug}/...`
 - Pause/Resume schedule + Cancel in-flight
-- Manual "Crawl now"
+- Kick-on-create and manual "Crawl now"
 - Pre-crawl `tar.gz` backups with per-site retention
 - Per-site progress fragment polled via HTMX
 
@@ -572,9 +572,5 @@ Not yet implemented:
 - **robots.txt log viewer.** Rows are written; no page yet to inspect them.
 - **Multi-host crawl scope** (e.g. follow subdomains). Currently same-host
   exact match only.
-- **Kick-on-create.** The pre-k8s scheduler fired an immediate crawl when a
-  site was added. The current k8s flow just creates a CronJob and waits for
-  the first scheduled fire. Restoring this is a one-line addition in the
-  create handler (`k8s.CreateCrawlJob`).
 
 PRs welcome.

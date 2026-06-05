@@ -97,6 +97,13 @@ func (s *Server) handleAdminSiteCreate(w http.ResponseWriter, r *http.Request) {
 		if err := s.k8s.EnsureCronJob(site); err != nil {
 			log.Printf("web: EnsureCronJob %s: %v", site.Slug, err)
 		}
+		if site.Enabled {
+			if jobName, err := s.k8s.CreateCrawlJob(site); err != nil {
+				log.Printf("web: kick-on-create CreateCrawlJob %s: %v", site.Slug, err)
+			} else {
+				log.Printf("web: kick-on-create job %s for site %s", jobName, site.Slug)
+			}
+		}
 	}
 	redirect(w, r, "/admin/sites", "Site "+site.Name+" created", "")
 }
