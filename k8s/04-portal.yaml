@@ -82,13 +82,8 @@ spec:
               mountPath: /data
           readinessProbe:
             httpGet:
-              path: /
+              path: /healthz
               port: 8080
-              httpHeaders:
-                # readiness probe skips basic-auth by sending invalid creds;
-                # a 401 means the server is up.
-                - name: Authorization
-                  value: Basic dW5hdXRoOg==
             initialDelaySeconds: 3
             periodSeconds: 10
             failureThreshold: 3

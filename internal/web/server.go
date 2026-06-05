@@ -61,6 +61,14 @@ func (s *Server) Router() http.Handler {
 	staticSub, _ := fs.Sub(staticFS, "static")
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
 
+	// No-auth liveness/readiness endpoint. The kubelet treats 2xx-3xx as
+	// healthy, so the previous probe (GET / → 401) was never actually
+	// succeeding — pods stayed 0/1 Ready forever.
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
 	r.Group(func(r chi.Router) {
 		r.Use(s.basicAuth)
 		r.Get("/", s.handleIndex)
